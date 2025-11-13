@@ -48,7 +48,7 @@ class _LoginPageState extends State<LoginPage> with SingleTickerProviderStateMix
       setState(() => _isLoading = true);
       
       try {
-        final url = Uri.parse("http://sci.rotio.id:9050/returx/api/user/login.php");
+        final url = Uri.parse("http://192.168.0.110/returx/api/user/login.php");
         final response = await http.post(
           url,
           headers: {"Content-Type": "application/json"},

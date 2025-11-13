@@ -43,7 +43,7 @@ class _ListReturPageState extends State<ListReturPage> {
 
     try {
       final response = await http.get(
-        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/list.php"),
+        Uri.parse("http://192.168.0.110/returx/api/retur/list.php"),
       );
 
       final result = jsonDecode(response.body);
@@ -238,7 +238,7 @@ class _ListReturPageState extends State<ListReturPage> {
 
     try {
       final response = await http.post(
-        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/delete.php"),
+        Uri.parse("http://192.168.0.110/returx/api/retur/delete.php"),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'id': item['id']}),
       );
@@ -1445,7 +1445,7 @@ class _EditReturPageState extends State<EditReturPage> {
       }
 
       final response = await http.post(
-        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/update.php"),
+        Uri.parse("http://192.168.0.110/returx/api/retur/update.php"),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({
           'id': widget.data['id'],
