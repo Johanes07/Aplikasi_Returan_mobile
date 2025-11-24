@@ -1,5 +1,6 @@
 import 'dart:typed_data';
 import 'dart:convert';
+import 'dart:io';
 import 'package:flutter/material.dart';
 import 'package:intl/intl.dart';
 import 'package:returan_apps/screens/list_retur.dart';
@@ -10,6 +11,7 @@ import 'package:returan_apps/model/retur_model.dart';
 import 'package:returan_apps/utils/printer_service.dart';
 import 'login_page.dart';
 import 'package:http/http.dart' as http;
+import 'package:image_picker/image_picker.dart';
 
 class FormReturPage extends StatefulWidget {
   const FormReturPage({super.key});
@@ -31,6 +33,8 @@ class _FormReturPageState extends State<FormReturPage> {
   String _tanggal = DateFormat('yyyy-MM-dd').format(DateTime.now());
 
   Uint8List? _ttdImage;
+  File? _fotoBarang;
+  final ImagePicker _picker = ImagePicker();
 
   @override
   void initState() {
@@ -47,7 +51,6 @@ class _FormReturPageState extends State<FormReturPage> {
     _keterangan.dispose();
     _snBarang.dispose();
     _nomorDokumen.dispose();
-
     super.dispose();
   }
 
@@ -66,6 +69,121 @@ class _FormReturPageState extends State<FormReturPage> {
         _ttdImage = base64Decode(ttdBase64);
       });
     }
+  }
+
+  Future<void> _ambilFotoDariKamera() async {
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.camera,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 85,
+      );
+
+      if (photo != null) {
+        setState(() {
+          _fotoBarang = File(photo.path);
+        });
+        _showSuccessSnackBar("Foto berhasil diambil");
+      }
+    } catch (e) {
+      _showErrorSnackBar("Gagal mengambil foto: $e");
+    }
+  }
+
+  Future<void> _ambilFotoDariGaleri() async {
+    try {
+      final XFile? photo = await _picker.pickImage(
+        source: ImageSource.gallery,
+        maxWidth: 1024,
+        maxHeight: 1024,
+        imageQuality: 85,
+      );
+
+      if (photo != null) {
+        setState(() {
+          _fotoBarang = File(photo.path);
+        });
+        _showSuccessSnackBar("Foto berhasil dipilih");
+      }
+    } catch (e) {
+      _showErrorSnackBar("Gagal memilih foto: $e");
+    }
+  }
+
+  Future<void> _pilihSumberFoto() async {
+    showModalBottomSheet(
+      context: context,
+      shape: const RoundedRectangleBorder(
+        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+      ),
+      builder: (context) => Container(
+        padding: const EdgeInsets.all(20),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            Container(
+              width: 40,
+              height: 4,
+              decoration: BoxDecoration(
+                color: Colors.grey.shade300,
+                borderRadius: BorderRadius.circular(2),
+              ),
+            ),
+            const SizedBox(height: 20),
+            const Text(
+              "Pilih Sumber Foto",
+              style: TextStyle(
+                fontSize: 18,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+            const SizedBox(height: 20),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.blue.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.camera_alt, color: Colors.blue),
+              ),
+              title: const Text("Kamera"),
+              subtitle: const Text("Ambil foto baru"),
+              onTap: () {
+                Navigator.pop(context);
+                _ambilFotoDariKamera();
+              },
+            ),
+            const SizedBox(height: 10),
+            ListTile(
+              leading: Container(
+                padding: const EdgeInsets.all(10),
+                decoration: BoxDecoration(
+                  color: Colors.purple.shade50,
+                  borderRadius: BorderRadius.circular(10),
+                ),
+                child: const Icon(Icons.photo_library, color: Colors.purple),
+              ),
+              title: const Text("Galeri"),
+              subtitle: const Text("Pilih dari galeri"),
+              onTap: () {
+                Navigator.pop(context);
+                _ambilFotoDariGaleri();
+              },
+            ),
+            const SizedBox(height: 20),
+          ],
+        ),
+      ),
+    );
+  }
+
+  void _hapusFoto() {
+    setState(() {
+      _fotoBarang = null;
+    });
+    _showSuccessSnackBar("Foto dihapus");
   }
 
   Future<void> _logout() async {
@@ -108,7 +226,6 @@ class _FormReturPageState extends State<FormReturPage> {
 
   Future<void> _simpanData() async {
     if (_formKey.currentState!.validate()) {
-      // Show loading
       showDialog(
         context: context,
         barrierDismissible: false,
@@ -129,6 +246,12 @@ class _FormReturPageState extends State<FormReturPage> {
         ),
       );
 
+      String? fotoBase64;
+      if (_fotoBarang != null) {
+        final bytes = await _fotoBarang!.readAsBytes();
+        fotoBase64 = base64Encode(bytes);
+      }
+
       final data = {
         "tanggal": _tanggal,
         "nama_toko": _namaToko.text,
@@ -139,23 +262,23 @@ class _FormReturPageState extends State<FormReturPage> {
         "kategori": _kategori,
         "keterangan": _keterangan.text,
         "ttd_base64": _ttdImage != null ? base64Encode(_ttdImage!) : "",
+        "foto_barang": fotoBase64 ?? "",
       };
 
       try {
         final response = await http.post(
-          Uri.parse("http://192.168.0.110/returx/api/retur/insert.php"),
+          Uri.parse("http://sci.rotio.id:9050/returx/api/retur/insert.php"),
           headers: {"Content-Type": "application/json"},
           body: jsonEncode(data),
         );
 
         final result = jsonDecode(response.body);
         
-        if (mounted) Navigator.pop(context); // Close loading
+        if (mounted) Navigator.pop(context);
 
         if (result["success"] == true) {
           _showSuccessSnackBar("Data berhasil disimpan ke server!");
 
-          // Cetak
           bool connected = await PrinterService.ensureConnected();
           if (connected) {
             await PrinterService.printRetur(
@@ -174,18 +297,20 @@ class _FormReturPageState extends State<FormReturPage> {
             );
           }
 
-          // Clear form
           _namaToko.clear();
           _namaBarang.clear();
           _keterangan.clear();
           _snBarang.clear();
           _nomorDokumen.clear();
-          setState(() => _kategori = 'OK');
+          setState(() {
+            _kategori = 'OK';
+            _fotoBarang = null;
+          });
         } else {
           _showErrorSnackBar("Gagal: ${result["message"]}");
         }
       } catch (e) {
-        if (mounted) Navigator.pop(context); // Close loading
+        if (mounted) Navigator.pop(context);
         _showErrorSnackBar("Error koneksi: $e");
       }
     }
@@ -397,7 +522,6 @@ class _FormReturPageState extends State<FormReturPage> {
                 backgroundColor: const Color(0xFF667eea),
                 child: Stack(
                   children: [
-                    // Inisial atau ikon user
                     Center(
                       child: Text(
                         _namaIT.text.isNotEmpty
@@ -410,7 +534,6 @@ class _FormReturPageState extends State<FormReturPage> {
                         ),
                       ),
                     ),
-                    // Badge TTD jika ada (centang hijau kecil di pojok kanan bawah)
                     if (_ttdImage != null)
                       Positioned(
                         right: 0,
@@ -440,7 +563,6 @@ class _FormReturPageState extends State<FormReturPage> {
   }
 
   Widget _buildHeader() {
-    // Format tanggal manual untuk menghindari error locale
     final now = DateTime.now();
     final days = ['Minggu', 'Senin', 'Selasa', 'Rabu', 'Kamis', 'Jumat', 'Sabtu'];
     final months = [
@@ -574,12 +696,137 @@ class _FormReturPageState extends State<FormReturPage> {
                 hint: "Masukkan keterangan",
                 maxLines: 4,
               ),
+              const SizedBox(height: 20),
+              _buildFotoSection(),
               const SizedBox(height: 30),
               _buildActionButtons(),
             ],
           ),
         ),
       ),
+    );
+  }
+
+  Widget _buildFotoSection() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Foto Barang",
+          style: TextStyle(
+            fontSize: 14,
+            fontWeight: FontWeight.w600,
+            color: Colors.black87,
+          ),
+        ),
+        const SizedBox(height: 8),
+        
+        if (_fotoBarang == null)
+          InkWell(
+            onTap: _pilihSumberFoto,
+            borderRadius: BorderRadius.circular(12),
+            child: Container(
+              height: 180,
+              decoration: BoxDecoration(
+                border: Border.all(
+                  color: Colors.grey.shade300,
+                  width: 2,
+                  style: BorderStyle.solid,
+                ),
+                borderRadius: BorderRadius.circular(12),
+                color: Colors.grey.shade50,
+              ),
+              child: Center(
+                child: Column(
+                  mainAxisAlignment: MainAxisAlignment.center,
+                  children: [
+                    Icon(
+                      Icons.add_photo_alternate_outlined,
+                      size: 48,
+                      color: Colors.grey.shade400,
+                    ),
+                    const SizedBox(height: 12),
+                    Text(
+                      "Tambah Foto Barang",
+                      style: TextStyle(
+                        color: Colors.grey.shade600,
+                        fontSize: 14,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      "Tap untuk memilih foto",
+                      style: TextStyle(
+                        color: Colors.grey.shade500,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          )
+        else
+          Stack(
+            children: [
+              ClipRRect(
+                borderRadius: BorderRadius.circular(12),
+                child: Image.file(
+                  _fotoBarang!,
+                  height: 250,
+                  width: double.infinity,
+                  fit: BoxFit.cover,
+                ),
+              ),
+              Positioned(
+                top: 8,
+                right: 8,
+                child: Row(
+                  children: [
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.blue,
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.edit, color: Colors.white, size: 20),
+                        onPressed: _pilihSumberFoto,
+                        tooltip: "Ganti foto",
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.red,
+                        borderRadius: BorderRadius.circular(8),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.black.withOpacity(0.2),
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
+                          ),
+                        ],
+                      ),
+                      child: IconButton(
+                        icon: const Icon(Icons.delete, color: Colors.white, size: 20),
+                        onPressed: _hapusFoto,
+                        tooltip: "Hapus foto",
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+      ],
     );
   }
 

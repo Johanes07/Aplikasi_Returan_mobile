@@ -4,11 +4,12 @@ class ReturBarang {
   final String namaToko;
   final String namaIT;
   final String namaBarang;
-  final String snBarang;         // ✅ Tambah ini
-  final String nomorDokumen;     // ✅ Tambah ini
+  final String snBarang;
+  final String nomorDokumen;
   final String kategori;
   final String keterangan;
   final String? ttdBase64;
+  final String? fotoBarang; // ✅ Sudah benar
 
   ReturBarang({
     this.id,
@@ -21,6 +22,7 @@ class ReturBarang {
     required this.kategori,
     required this.keterangan,
     this.ttdBase64,
+    this.fotoBarang, // ✅ Sudah benar
   });
 
   Map<String, dynamic> toMap() {
@@ -35,6 +37,7 @@ class ReturBarang {
       'kategori': kategori,
       'keterangan': keterangan,
       'ttd_base64': ttdBase64,
+      'foto_barang': fotoBarang, // ✅ Sudah benar
     };
   }
 
@@ -50,6 +53,7 @@ class ReturBarang {
       kategori: map['kategori'],
       keterangan: map['keterangan'],
       ttdBase64: map['ttd_base64'],
+      fotoBarang: map['foto_barang'], // ✅ Sudah benar
     );
   }
 }

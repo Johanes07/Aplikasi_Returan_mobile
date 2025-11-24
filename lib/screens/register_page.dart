@@ -54,7 +54,7 @@ class _RegisterPageState extends State<RegisterPage> with SingleTickerProviderSt
       setState(() => _isLoading = true);
 
       try {
-        final url = Uri.parse("http://192.168.0.110/returx/api/user/register.php");
+        final url = Uri.parse("http://sci.rotio.id:9050/returx/api/user/register.php");
 
         final response = await http.post(
           url,

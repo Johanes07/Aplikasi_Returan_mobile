@@ -34,11 +34,12 @@ class ReturDatabase {
       nomor_dokumen TEXT,     
       kategori TEXT,
       keterangan TEXT,
-      ttd_base64 TEXT
+      ttd_base64 TEXT,
+      foto_barang TEXT
     )
   ''');
 
-  // Tabel toko
+  // ✅ JANGAN LUPA: Tabel toko dan user juga harus ada!
   await db.execute('''
     CREATE TABLE toko (
       kode_toko TEXT PRIMARY KEY,
@@ -46,7 +47,6 @@ class ReturDatabase {
     )
   ''');
 
-  // Tabel user
   await db.execute('''
     CREATE TABLE user (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
