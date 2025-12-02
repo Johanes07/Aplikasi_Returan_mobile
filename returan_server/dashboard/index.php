@@ -290,7 +290,7 @@ $recent_query = mysqli_query($conn, "SELECT * FROM retur_barang ORDER BY id DESC
 <body>
   <div class="container">
     <div class="header">
-      <h1>📦 Dashboard Sistem Retur Barang IT</h1>
+      <h1>ðŸ“¦ Dashboard Sistem Retur Barang IT</h1>
       <div class="user-info">
         <p>Selamat datang, <strong><?= htmlspecialchars($admin) ?></strong></p>
         <a href="logout.php" class="logout-btn">Logout</a>
@@ -300,17 +300,17 @@ $recent_query = mysqli_query($conn, "SELECT * FROM retur_barang ORDER BY id DESC
     <!-- Statistik Cards -->
     <div class="stats-grid">
       <div class="stat-card">
-        <h3>📊 Total Retur</h3>
+        <h3>ðŸ“Š Total Retur</h3>
         <div class="number" data-target="<?= $total_retur ?>">0</div>
         <div class="label">Total keseluruhan</div>
       </div>
       <div class="stat-card" style="background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%);">
-        <h3>📅 Retur Bulan Ini</h3>
+        <h3>ðŸ“… Retur Bulan Ini</h3>
         <div class="number" data-target="<?= $retur_bulan_ini ?>">0</div>
         <div class="label"><?= date('F Y') ?></div>
       </div>
       <div class="stat-card" style="background: linear-gradient(135deg, #4facfe 0%, #00f2fe 100%);">
-        <h3>🏪 Total Toko</h3>
+        <h3>ðŸª Total Toko</h3>
         <div class="number" data-target="<?= $total_toko ?>">0</div>
         <div class="label">Toko terdaftar</div>
       </div>
@@ -319,24 +319,24 @@ $recent_query = mysqli_query($conn, "SELECT * FROM retur_barang ORDER BY id DESC
     <!-- Charts -->
     <div class="chart-grid">
       <div class="chart-container">
-        <div class="chart-title">📈 Retur per Hari (14 Hari Terakhir)</div>
+        <div class="chart-title">ðŸ“ˆ Retur per Hari (14 Hari Terakhir)</div>
         <canvas id="monthlyChart"></canvas>
       </div>
       <div class="chart-container">
-        <div class="chart-title">🏷️ Retur per Kategori</div>
+        <div class="chart-title">ðŸ·ï¸ Retur per Kategori</div>
         <canvas id="categoryChart"></canvas>
       </div>
     </div>
 
     <!-- Top Toko -->
     <div class="chart-container">
-      <div class="chart-title">🏆 Top 5 Toko dengan Retur Terbanyak</div>
+      <div class="chart-title">ðŸ† Top 5 Toko dengan Retur Terbanyak</div>
       <canvas id="tokoChart"></canvas>
     </div>
 
     <!-- Retur Terbaru -->
     <div class="recent-table">
-      <div class="chart-title">🕒 Retur Terbaru</div>
+      <div class="chart-title">ðŸ•’ Retur Terbaru</div>
       <table>
         <thead>
           <tr>
@@ -379,7 +379,7 @@ $recent_query = mysqli_query($conn, "SELECT * FROM retur_barang ORDER BY id DESC
     <ul class="nav-menu">
       <li>
         <a href="retur_list.php">
-          📋 Lihat Semua Data Retur
+          ðŸ“‹ Lihat Semua Data Retur
         </a>
       </li>
     </ul>

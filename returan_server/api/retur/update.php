@@ -28,6 +28,7 @@ $nomor_dokumen = $input['nomor_dokumen'] ?? '';
 $kategori = $input['kategori'] ?? '';
 $keterangan = $input['keterangan'] ?? '';
 $ttd_base64 = $input['ttd_base64'] ?? null;
+$foto_barang = $input['foto_barang'] ?? null; // ? TAMBAHAN
 
 if (!$id) {
     echo json_encode(['success' => false, 'message' => 'ID tidak boleh kosong']);
@@ -39,8 +40,33 @@ if (empty($tanggal) || empty($nama_toko) || empty($nama_it) || empty($nama_baran
     exit;
 }
 
-// Jika ada ttd_base64 baru, update dengan TTD
-if ($ttd_base64 !== null && $ttd_base64 !== '') {
+// ? LOGIKA UPDATE: Cek apakah ada TTD baru DAN Foto baru
+$updateTTD = ($ttd_base64 !== null);
+$updateFoto = ($foto_barang !== null);
+
+if ($updateTTD && $updateFoto) {
+    // Update TTD dan Foto
+    $query = "UPDATE retur_barang SET 
+                tanggal = ?,
+                nama_toko = ?,
+                nama_it = ?,
+                nama_barang = ?,
+                sn_barang = ?,
+                nomor_dokumen = ?,
+                kategori = ?,
+                keterangan = ?,
+                ttd_base64 = ?,
+                foto_barang = ?
+              WHERE id = ?";
+    
+    $stmt = mysqli_prepare($conn, $query);
+    mysqli_stmt_bind_param($stmt, "ssssssssssi", 
+        $tanggal, $nama_toko, $nama_it, $nama_barang, 
+        $sn_barang, $nomor_dokumen, $kategori, $keterangan, 
+        $ttd_base64, $foto_barang, $id
+    );
+} elseif ($updateTTD && !$updateFoto) {
+    // Update TTD saja
     $query = "UPDATE retur_barang SET 
                 tanggal = ?,
                 nama_toko = ?,
@@ -59,8 +85,28 @@ if ($ttd_base64 !== null && $ttd_base64 !== '') {
         $sn_barang, $nomor_dokumen, $kategori, $keterangan, 
         $ttd_base64, $id
     );
+} elseif (!$updateTTD && $updateFoto) {
+    // Update Foto saja
+    $query = "UPDATE retur_barang SET 
+                tanggal = ?,
+                nama_toko = ?,
+                nama_it = ?,
+                nama_barang = ?,
+                sn_barang = ?,
+                nomor_dokumen = ?,
+                kategori = ?,
+                keterangan = ?,
+                foto_barang = ?
+              WHERE id = ?";
+    
+    $stmt = mysqli_prepare($conn, $query);
+    mysqli_stmt_bind_param($stmt, "sssssssssi", 
+        $tanggal, $nama_toko, $nama_it, $nama_barang, 
+        $sn_barang, $nomor_dokumen, $kategori, $keterangan, 
+        $foto_barang, $id
+    );
 } else {
-    // Jika tidak ada ttd_base64 baru, update tanpa mengubah TTD yang lama
+    // Update tanpa TTD dan Foto (tidak mengubah yang lama)
     $query = "UPDATE retur_barang SET 
                 tanggal = ?,
                 nama_toko = ?,
