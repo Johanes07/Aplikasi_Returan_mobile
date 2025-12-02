@@ -8,9 +8,8 @@ import 'package:pdf/pdf.dart';
 import 'package:printing/printing.dart';
 import 'package:returan_apps/utils/printer_service.dart';
 import 'package:returan_apps/model/retur_model.dart';
-import 'package:signature/signature.dart';
 import 'package:image_picker/image_picker.dart';
-import 'dart:io';  // ✅ PENTING: Untuk File class
+import 'dart:io';
 
 class ListReturPage extends StatefulWidget {
   const ListReturPage({super.key});
@@ -24,8 +23,13 @@ class _ListReturPageState extends State<ListReturPage> {
   List<Map<String, dynamic>> _filteredData = [];
   String _selectedKategori = 'All';
   bool _isLoading = false;
+  bool _isFirstLoad = true;
 
-  // ✅ Date Filter Variables
+  // ✅ Cache untuk menghindari decode berulang
+  final Map<String, Uint8List?> _fotoCache = {};
+  final Map<String, Uint8List?> _ttdCache = {};
+
+  // ✅ Date Filter Variables - DEFAULT HARI INI
   DateTime? _selectedDate;
 
   int _okCount = 0;
@@ -35,6 +39,8 @@ class _ListReturPageState extends State<ListReturPage> {
   @override
   void initState() {
     super.initState();
+    // Set default tanggal ke hari ini
+    _selectedDate = DateTime.now();
     _loadData();
   }
 
@@ -44,16 +50,25 @@ class _ListReturPageState extends State<ListReturPage> {
     });
 
     try {
+      // ✅ OPTIMASI: Format tanggal untuk filter server-side
+      String tanggalParam = DateFormat('yyyy-MM-dd').format(_selectedDate!);
+      
       final response = await http.get(
-        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/list.php"),
+        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/list.php?tanggal=$tanggalParam"),
       );
 
       final result = jsonDecode(response.body);
       if (result['success'] == true) {
         List data = result['data'];
+        
+        // Clear cache setiap load data baru
+        _fotoCache.clear();
+        _ttdCache.clear();
+        
         int ok = 0, service = 0, waste = 0;
 
         for (var item in data) {
+          // Hitung kategori tanpa proses berat
           switch (item['kategori']) {
             case 'OK':
               ok++;
@@ -74,10 +89,12 @@ class _ListReturPageState extends State<ListReturPage> {
           _serviceCount = service;
           _wasteCount = waste;
           _isLoading = false;
+          _isFirstLoad = false;
         });
       } else {
         setState(() {
           _isLoading = false;
+          _isFirstLoad = false;
         });
         if (mounted) {
           _showErrorSnackBar("Gagal memuat data: ${result['message']}");
@@ -86,6 +103,7 @@ class _ListReturPageState extends State<ListReturPage> {
     } catch (e) {
       setState(() {
         _isLoading = false;
+        _isFirstLoad = false;
       });
       if (mounted) {
         _showErrorSnackBar("Error koneksi: $e");
@@ -95,29 +113,41 @@ class _ListReturPageState extends State<ListReturPage> {
 
   DateTime? _parseDate(String dateStr) {
     if (dateStr.isEmpty) return null;
-
-    final formats = [
-      'yyyy-MM-dd',
-      'yyyy/MM/dd',
-      'dd/MM/yyyy',
-      'dd-MM-yyyy',
-      'd/M/yyyy',
-      'd-M-yyyy',
-      'dd/MM/yy',
-      'dd-MM-yy',
-    ];
-
-    for (var formatStr in formats) {
-      try {
-        final format = DateFormat(formatStr);
-        final parsed = format.parse(dateStr, true);
-        final normalized = DateTime(parsed.year, parsed.month, parsed.day);
-        return normalized;
-      } catch (e) {
-        continue;
+    
+    // ✅ OPTIMASI: Coba format yang paling umum dulu
+    try {
+      // Format yyyy-MM-dd (format umum dari database)
+      final parts = dateStr.split('-');
+      if (parts.length == 3) {
+        final year = int.tryParse(parts[0]);
+        final month = int.tryParse(parts[1]);
+        final day = int.tryParse(parts[2]);
+        if (year != null && month != null && day != null) {
+          return DateTime(year, month, day);
+        }
       }
+    } catch (e) {
+      // Coba format lain
     }
-
+    
+    // Fallback ke DateFormat hanya jika diperlukan
+    try {
+      // Coba format dd/MM/yyyy
+      final parts = dateStr.split('/');
+      if (parts.length == 3) {
+        final day = int.tryParse(parts[0]);
+        final month = int.tryParse(parts[1]);
+        final year = int.tryParse(parts[2]);
+        if (year != null && month != null && day != null) {
+          // Handle tahun 2 digit
+          final fullYear = year < 100 ? 2000 + year : year;
+          return DateTime(fullYear, month, day);
+        }
+      }
+    } catch (e) {
+      return null;
+    }
+    
     return null;
   }
 
@@ -183,15 +213,15 @@ class _ListReturPageState extends State<ListReturPage> {
       setState(() {
         _selectedDate = picked;
       });
-      _applyFilters();
+      _loadData();
     }
   }
 
   void _clearDateFilter() {
     setState(() {
-      _selectedDate = null;
+      _selectedDate = DateTime.now(); // Reset ke hari ini
     });
-    _applyFilters();
+    _loadData();
   }
 
   // ================= EDIT DATA =================
@@ -204,7 +234,7 @@ class _ListReturPageState extends State<ListReturPage> {
     );
 
     if (result == true) {
-      _loadData(); // Refresh data setelah edit
+      _loadData();
       _showSuccessSnackBar("Data berhasil diupdate!");
     }
   }
@@ -413,53 +443,56 @@ class _ListReturPageState extends State<ListReturPage> {
     }
   }
 
-  // ================= FOTO BARANG UTILS =================
-  Uint8List? _decodeFotoBarang(String? fotoBase64) {
+  // ================= FOTO BARANG UTILS dengan CACHE =================
+  Uint8List? _getCachedFotoBarang(String id, String? fotoBase64) {
     if (fotoBase64 == null || fotoBase64.isEmpty) {
       return null;
     }
+    
+    // Cek cache dulu
+    if (_fotoCache.containsKey(id)) {
+      return _fotoCache[id];
+    }
+    
+    // Decode dan cache
     try {
-      return base64Decode(fotoBase64);
+      final decoded = base64Decode(fotoBase64);
+      _fotoCache[id] = decoded;
+      return decoded;
     } catch (e) {
       print('Error decoding foto barang: $e');
+      _fotoCache[id] = null;
       return null;
     }
   }
 
-  Widget _buildItemImage(Uint8List? fotoBarang, Uint8List? ttdImage) {
-    // ✅ Prioritaskan foto barang
-    if (fotoBarang != null) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.memory(
-          fotoBarang,
-          fit: BoxFit.cover,
-          errorBuilder: (context, error, stackTrace) {
-            return _buildPlaceholderIcon(Icons.photo_camera);
-          },
-        ),
-      );
+  Uint8List? _getCachedTTD(String id, String? ttdBase64) {
+    if (ttdBase64 == null || ttdBase64.isEmpty) {
+      return null;
     }
     
-    // ✅ Jika tidak ada foto barang, tampilkan tanda tangan
-    if (ttdImage != null) {
-      return ClipRRect(
-        borderRadius: BorderRadius.circular(8),
-        child: Image.memory(
-          ttdImage,
-          fit: BoxFit.cover,
-        ),
-      );
+    // Cek cache dulu
+    if (_ttdCache.containsKey(id)) {
+      return _ttdCache[id];
     }
     
-    // ✅ Default icon jika tidak ada keduanya
-    return _buildPlaceholderIcon(Icons.inventory_2_outlined);
+    // Decode dan cache
+    try {
+      final decoded = base64Decode(ttdBase64);
+      _ttdCache[id] = decoded;
+      return decoded;
+    } catch (e) {
+      print('Error decoding TTD: $e');
+      _ttdCache[id] = null;
+      return null;
+    }
   }
 
-  Widget _buildPlaceholderIcon(IconData icon) {
+  // MODIFIED: Hanya tampilkan icon, bukan gambar
+  Widget _buildItemImage() {
     return Center(
       child: Icon(
-        icon,
+        Icons.inventory_2_outlined,
         size: 32,
         color: Colors.grey.shade400,
       ),
@@ -562,7 +595,7 @@ class _ListReturPageState extends State<ListReturPage> {
 
       // ✅ FOTO BARANG WIDGET
       pw.Widget fotoWidget;
-      final fotoBarang = _decodeFotoBarang(item['foto_barang']);
+      final fotoBarang = _getCachedFotoBarang(item['id'].toString(), item['foto_barang']);
       if (fotoBarang != null) {
         fotoWidget = pw.Image(pw.MemoryImage(fotoBarang), width: 50, height: 50);
       } else {
@@ -578,7 +611,7 @@ class _ListReturPageState extends State<ListReturPage> {
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['nama_it'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['kategori'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['keterangan'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: fotoWidget), // ✅ FOTO BARANG
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: fotoWidget),
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: ttdWidget),
       ]);
     }).toList();
@@ -625,7 +658,7 @@ class _ListReturPageState extends State<ListReturPage> {
                   pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('IT', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
                   pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('Kategori', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
                   pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('Keterangan', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
-                  pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('Foto', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))), // ✅ FOTO HEADER
+                  pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('Foto', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
                   pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text('TTD', style: pw.TextStyle(fontWeight: pw.FontWeight.bold, fontSize: 10))),
                 ],
               ),
@@ -693,7 +726,7 @@ class _ListReturPageState extends State<ListReturPage> {
     );
   }
 
-  // ================= BUILD =================
+  // ================= BUILD dengan SHIMMER LOADING =================
   @override
   Widget build(BuildContext context) {
     final bool isMobile = MediaQuery.of(context).size.width < 600;
@@ -775,8 +808,8 @@ class _ListReturPageState extends State<ListReturPage> {
           ),
         ],
       ),
-      body: _isLoading
-          ? const Center(child: CircularProgressIndicator())
+      body: _isLoading && _isFirstLoad
+          ? _buildShimmerLoading(isMobile)
           : SingleChildScrollView(
               padding: const EdgeInsets.all(16.0),
               child: Column(
@@ -945,7 +978,7 @@ class _ListReturPageState extends State<ListReturPage> {
                           const Divider(height: 1),
                           const SizedBox(height: 16),
                           
-                          // Date Filter
+                          // Date Filter (DEFAULT HARI INI)
                           Row(
                             children: [
                               const Icon(Icons.calendar_today, size: 20, color: Color(0xFF667eea)),
@@ -960,52 +993,36 @@ class _ListReturPageState extends State<ListReturPage> {
                               ),
                               const SizedBox(width: 12),
                               Expanded(
-                                child: _selectedDate != null
-                                    ? Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.blue.shade50,
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: Colors.blue.shade200),
-                                        ),
-                                        child: Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                DateFormat('dd MMM yyyy').format(_selectedDate!),
-                                                style: TextStyle(
-                                                  fontSize: isMobile ? 12 : 14,
-                                                  fontWeight: FontWeight.w500,
-                                                  color: Colors.blue.shade700,
-                                                ),
-                                              ),
-                                            ),
-                                            InkWell(
-                                              onTap: _clearDateFilter,
-                                              child: Icon(
-                                                Icons.close,
-                                                size: 18,
-                                                color: Colors.blue.shade700,
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      )
-                                    : Container(
-                                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          borderRadius: BorderRadius.circular(8),
-                                          border: Border.all(color: Colors.grey.shade300),
-                                        ),
+                                child: Container(
+                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                                  decoration: BoxDecoration(
+                                    color: Colors.blue.shade50,
+                                    borderRadius: BorderRadius.circular(8),
+                                    border: Border.all(color: Colors.blue.shade200),
+                                  ),
+                                  child: Row(
+                                    children: [
+                                      Expanded(
                                         child: Text(
-                                          "Semua Tanggal",
+                                          DateFormat('dd MMM yyyy').format(_selectedDate!),
                                           style: TextStyle(
                                             fontSize: isMobile ? 12 : 14,
-                                            color: Colors.grey.shade600,
+                                            fontWeight: FontWeight.w500,
+                                            color: Colors.blue.shade700,
                                           ),
                                         ),
                                       ),
+                                      InkWell(
+                                        onTap: _clearDateFilter,
+                                        child: Icon(
+                                          Icons.close,
+                                          size: 18,
+                                          color: Colors.blue.shade700,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                                ),
                               ),
                               const SizedBox(width: 8),
                               ElevatedButton(
@@ -1027,6 +1044,15 @@ class _ListReturPageState extends State<ListReturPage> {
                                 ),
                               ),
                             ],
+                          ),
+                          const SizedBox(height: 8),
+                          Text(
+                            "Default: Data hari ini. Klik X untuk reset ke hari ini",
+                            style: TextStyle(
+                              fontSize: isMobile ? 10 : 11,
+                              color: Colors.grey.shade600,
+                              fontStyle: FontStyle.italic,
+                            ),
                           ),
                         ],
                       ),
@@ -1068,218 +1094,224 @@ class _ListReturPageState extends State<ListReturPage> {
                   const SizedBox(height: 12),
                   
                   // List Data
-                  _filteredData.isEmpty
-                      ? Container(
-                          height: 300,
-                          alignment: Alignment.center,
-                          child: Column(
-                            mainAxisAlignment: MainAxisAlignment.center,
-                            children: [
-                              Icon(Icons.inbox, size: 64, color: Colors.grey.shade400),
-                              const SizedBox(height: 16),
-                              Text(
-                                _selectedDate != null
-                                    ? "Tidak ada data pada tanggal\n${DateFormat('dd MMM yyyy').format(_selectedDate!)}"
-                                    : "Belum ada data retur",
-                                style: TextStyle(
-                                  color: Colors.grey.shade600, 
-                                  fontSize: isMobile ? 14 : 16,
+                  if (_isLoading && !_isFirstLoad)
+                    _buildListShimmer(isMobile)
+                  else if (_filteredData.isEmpty)
+                    Container(
+                      height: 300,
+                      alignment: Alignment.center,
+                      child: Column(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: [
+                          Icon(Icons.inbox, size: 64, color: Colors.grey.shade400),
+                          const SizedBox(height: 16),
+                          Text(
+                            _selectedDate != null
+                                ? "Tidak ada data pada tanggal\n${DateFormat('dd MMM yyyy').format(_selectedDate!)}"
+                                : "Belum ada data retur",
+                            style: TextStyle(
+                              color: Colors.grey.shade600, 
+                              fontSize: isMobile ? 14 : 16,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          if (_selectedDate != null) ...[
+                            const SizedBox(height: 16),
+                            ElevatedButton.icon(
+                              onPressed: _clearDateFilter,
+                              icon: const Icon(Icons.clear, size: 18),
+                              label: Text("Reset Filter", style: TextStyle(fontSize: isMobile ? 12 : 14)),
+                              style: ElevatedButton.styleFrom(
+                                backgroundColor: const Color(0xFF667eea),
+                                foregroundColor: Colors.white,
+                                padding: EdgeInsets.symmetric(
+                                  horizontal: isMobile ? 20 : 24, 
+                                  vertical: isMobile ? 10 : 12,
                                 ),
-                                textAlign: TextAlign.center,
+                                shape: RoundedRectangleBorder(
+                                  borderRadius: BorderRadius.circular(8),
+                                ),
                               ),
-                              if (_selectedDate != null) ...[
-                                const SizedBox(height: 16),
-                                ElevatedButton.icon(
-                                  onPressed: _clearDateFilter,
-                                  icon: const Icon(Icons.clear, size: 18),
-                                  label: Text("Reset Filter", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                                  style: ElevatedButton.styleFrom(
-                                    backgroundColor: const Color(0xFF667eea),
-                                    foregroundColor: Colors.white,
-                                    padding: EdgeInsets.symmetric(
-                                      horizontal: isMobile ? 20 : 24, 
-                                      vertical: isMobile ? 10 : 12,
-                                    ),
-                                    shape: RoundedRectangleBorder(
+                            ),
+                          ],
+                        ],
+                      ),
+                    )
+                  else
+                    ListView.builder(
+                      shrinkWrap: true,
+                      physics: const NeverScrollableScrollPhysics(),
+                      itemCount: _filteredData.length,
+                      itemBuilder: (context, index) {
+                        final item = _filteredData[index];
+
+                        // ✅ OPTIMASI: Gunakan cache
+                        Uint8List? ttdImage;
+                        if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
+                          ttdImage = _getCachedTTD(item['id'].toString(), item['ttd_base64']);
+                        }
+
+                        Uint8List? fotoBarangImage;
+                        if (item['foto_barang'] != null && item['foto_barang'] != "") {
+                          fotoBarangImage = _getCachedFotoBarang(item['id'].toString(), item['foto_barang']);
+                        }
+
+                        Color kategoriColor;
+                        switch (item['kategori']) {
+                          case 'OK':
+                            kategoriColor = Colors.green;
+                            break;
+                          case 'Service':
+                            kategoriColor = Colors.orange;
+                            break;
+                          case 'Waste':
+                            kategoriColor = Colors.red;
+                            break;
+                          default:
+                            kategoriColor = Colors.grey;
+                        }
+
+                        return Card(
+                          margin: const EdgeInsets.only(bottom: 12),
+                          elevation: 2,
+                          shape: RoundedRectangleBorder(
+                            borderRadius: BorderRadius.circular(12),
+                          ),
+                          child: InkWell(
+                            borderRadius: BorderRadius.circular(12),
+                            onTap: () {
+                              _showDetailDialog(item, ttdImage, fotoBarangImage, isMobile);
+                            },
+                            child: Padding(
+                              padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
+                              child: Row(
+                                children: [
+                                  // Hanya icon, bukan gambar
+                                  Container(
+                                    width: isMobile ? 50 : 60,
+                                    height: isMobile ? 50 : 60,
+                                    decoration: BoxDecoration(
+                                      color: Colors.grey.shade100,
                                       borderRadius: BorderRadius.circular(8),
                                     ),
+                                    child: _buildItemImage(),
                                   ),
-                                ),
-                              ],
-                            ],
-                          ),
-                        )
-                      : ListView.builder(
-                          shrinkWrap: true,
-                          physics: const NeverScrollableScrollPhysics(),
-                          itemCount: _filteredData.length,
-                          itemBuilder: (context, index) {
-                            final item = _filteredData[index];
-
-                            Uint8List? ttdImage;
-                            if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
-                              ttdImage = base64Decode(item['ttd_base64']);
-                            }
-
-                            // ✅ DECODE FOTO BARANG
-                            Uint8List? fotoBarangImage = _decodeFotoBarang(item['foto_barang']);
-
-                            Color kategoriColor;
-                            switch (item['kategori']) {
-                              case 'OK':
-                                kategoriColor = Colors.green;
-                                break;
-                              case 'Service':
-                                kategoriColor = Colors.orange;
-                                break;
-                              case 'Waste':
-                                kategoriColor = Colors.red;
-                                break;
-                              default:
-                                kategoriColor = Colors.grey;
-                            }
-
-                            return Card(
-                              margin: const EdgeInsets.only(bottom: 12),
-                              elevation: 2,
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(12),
-                              ),
-                              child: InkWell(
-                                borderRadius: BorderRadius.circular(12),
-                                onTap: () {
-                                  _showDetailDialog(item, ttdImage, fotoBarangImage, isMobile);
-                                },
-                                child: Padding(
-                                  padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
-                                  child: Row(
-                                    children: [
-                                      // ✅ FOTO BARANG (Prioritas) atau Tanda Tangan
-                                      Container(
-                                        width: isMobile ? 50 : 60,
-                                        height: isMobile ? 50 : 60,
-                                        decoration: BoxDecoration(
-                                          color: Colors.grey.shade100,
-                                          borderRadius: BorderRadius.circular(8),
-                                        ),
-                                        child: _buildItemImage(fotoBarangImage, ttdImage),
-                                      ),
-                                      SizedBox(width: isMobile ? 8 : 12),
-                                      
-                                      // Main Content
-                                      Expanded(
-                                        child: Column(
-                                          crossAxisAlignment: CrossAxisAlignment.start,
+                                  SizedBox(width: isMobile ? 8 : 12),
+                                  
+                                  // Main Content
+                                  Expanded(
+                                    child: Column(
+                                      crossAxisAlignment: CrossAxisAlignment.start,
+                                      children: [
+                                        Row(
                                           children: [
-                                            Row(
-                                              children: [
-                                                Expanded(
-                                                  child: Text(
-                                                    item['nama_toko'] ?? '-',
-                                                    style: TextStyle(
-                                                      fontWeight: FontWeight.bold,
-                                                      fontSize: isMobile ? 14 : 16,
-                                                    ),
-                                                    maxLines: 1,
-                                                    overflow: TextOverflow.ellipsis,
-                                                  ),
+                                            Expanded(
+                                              child: Text(
+                                                item['nama_toko'] ?? '-',
+                                                style: TextStyle(
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: isMobile ? 14 : 16,
                                                 ),
-                                                Container(
-                                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                                                  decoration: BoxDecoration(
-                                                    color: kategoriColor.withOpacity(0.2),
-                                                    borderRadius: BorderRadius.circular(4),
-                                                    border: Border.all(color: kategoriColor.withOpacity(0.5)),
-                                                  ),
-                                                  child: Text(
-                                                    item['kategori'] ?? '-',
-                                                    style: TextStyle(
-                                                      color: kategoriColor,
-                                                      fontWeight: FontWeight.bold,
-                                                      fontSize: isMobile ? 10 : 12,
-                                                    ),
-                                                  ),
-                                                ),
-                                              ],
-                                            ),
-                                            const SizedBox(height: 2),
-                                            Text(
-                                              item['nama_barang'] ?? '-',
-                                              style: TextStyle(
-                                                fontSize: isMobile ? 12 : 14,
+                                                maxLines: 1,
+                                                overflow: TextOverflow.ellipsis,
                                               ),
-                                              maxLines: 1,
-                                              overflow: TextOverflow.ellipsis,
                                             ),
-                                            const SizedBox(height: 2),
-                                            Row(
-                                              children: [
-                                                Icon(Icons.person_outline, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
-                                                const SizedBox(width: 4),
-                                                Text(
-                                                  "IT: ${item['nama_it'] ?? '-'}",
-                                                  style: TextStyle(
-                                                    fontSize: isMobile ? 10 : 12, 
-                                                    color: Colors.grey.shade600
-                                                  ),
+                                            Container(
+                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                                              decoration: BoxDecoration(
+                                                color: kategoriColor.withOpacity(0.2),
+                                                borderRadius: BorderRadius.circular(4),
+                                                border: Border.all(color: kategoriColor.withOpacity(0.5)),
+                                              ),
+                                              child: Text(
+                                                item['kategori'] ?? '-',
+                                                style: TextStyle(
+                                                  color: kategoriColor,
+                                                  fontWeight: FontWeight.bold,
+                                                  fontSize: isMobile ? 10 : 12,
                                                 ),
-                                                SizedBox(width: isMobile ? 6 : 12),
-                                                Icon(Icons.calendar_today, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
-                                                const SizedBox(width: 4),
-                                                Text(
-                                                  item['tanggal'] ?? '-',
-                                                  style: TextStyle(
-                                                    fontSize: isMobile ? 10 : 12, 
-                                                    color: Colors.grey.shade600
-                                                  ),
-                                                ),
-                                              ],
+                                              ),
                                             ),
                                           ],
                                         ),
+                                        const SizedBox(height: 2),
+                                        Text(
+                                          item['nama_barang'] ?? '-',
+                                          style: TextStyle(
+                                            fontSize: isMobile ? 12 : 14,
+                                          ),
+                                          maxLines: 1,
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                        const SizedBox(height: 2),
+                                        Row(
+                                          children: [
+                                            Icon(Icons.person_outline, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              "IT: ${item['nama_it'] ?? '-'}",
+                                              style: TextStyle(
+                                                fontSize: isMobile ? 10 : 12, 
+                                                color: Colors.grey.shade600
+                                              ),
+                                            ),
+                                            SizedBox(width: isMobile ? 6 : 12),
+                                            Icon(Icons.calendar_today, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
+                                            const SizedBox(width: 4),
+                                            Text(
+                                              item['tanggal'] ?? '-',
+                                              style: TextStyle(
+                                                fontSize: isMobile ? 10 : 12, 
+                                                color: Colors.grey.shade600
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                      ],
+                                    ),
+                                  ),
+                                  
+                                  // Action Buttons
+                                  Column(
+                                    children: [
+                                      // Edit Button
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.orange.shade50,
+                                          borderRadius: BorderRadius.circular(6),
+                                        ),
+                                        child: IconButton(
+                                          icon: Icon(Icons.edit, size: isMobile ? 18 : 20),
+                                          color: Colors.orange,
+                                          tooltip: "Edit",
+                                          onPressed: () => _editData(item),
+                                          padding: EdgeInsets.all(isMobile ? 4 : 8),
+                                        ),
                                       ),
-                                      
-                                      // Action Buttons
-                                      Column(
-                                        children: [
-                                          // Edit Button
-                                          Container(
-                                            decoration: BoxDecoration(
-                                              color: Colors.orange.shade50,
-                                              borderRadius: BorderRadius.circular(6),
-                                            ),
-                                            child: IconButton(
-                                              icon: Icon(Icons.edit, size: isMobile ? 18 : 20),
-                                              color: Colors.orange,
-                                              tooltip: "Edit",
-                                              onPressed: () => _editData(item),
-                                              padding: EdgeInsets.all(isMobile ? 4 : 8),
-                                            ),
-                                          ),
-                                          SizedBox(height: isMobile ? 2 : 4),
-                                          // Print Button
-                                          Container(
-                                            decoration: BoxDecoration(
-                                              color: Colors.blue.shade50,
-                                              borderRadius: BorderRadius.circular(6),
-                                            ),
-                                            child: IconButton(
-                                              icon: Icon(Icons.print, size: isMobile ? 18 : 20),
-                                              color: Colors.blueAccent,
-                                              tooltip: "Print",
-                                              onPressed: () => _printSingleItem(item),
-                                              padding: EdgeInsets.all(isMobile ? 4 : 8),
-                                            ),
-                                          ),
-                                        ],
+                                      SizedBox(height: isMobile ? 2 : 4),
+                                      // Print Button
+                                      Container(
+                                        decoration: BoxDecoration(
+                                          color: Colors.blue.shade50,
+                                          borderRadius: BorderRadius.circular(6),
+                                        ),
+                                        child: IconButton(
+                                          icon: Icon(Icons.print, size: isMobile ? 18 : 20),
+                                          color: Colors.blueAccent,
+                                          tooltip: "Print",
+                                          onPressed: () => _printSingleItem(item),
+                                          padding: EdgeInsets.all(isMobile ? 4 : 8),
+                                        ),
                                       ),
                                     ],
                                   ),
-                                ),
+                                ],
                               ),
-                            );
-                          },
-                        ),
+                            ),
+                          ),
+                        );
+                      },
+                    ),
                 ],
               ),
             ),
@@ -1421,7 +1453,7 @@ class _ListReturPageState extends State<ListReturPage> {
                     const SizedBox(height: 8),
                     GestureDetector(
                       onTap: () {
-                        Navigator.pop(context); // Close detail dialog first
+                        Navigator.pop(context);
                         _showZoomImageDialog(fotoBarangImage, "Foto Barang - ${item['nama_barang']}");
                       },
                       child: Center(
@@ -1465,7 +1497,7 @@ class _ListReturPageState extends State<ListReturPage> {
                   if (ttdImage != null)
                     GestureDetector(
                       onTap: () {
-                        Navigator.pop(context); // Close detail dialog first
+                        Navigator.pop(context);
                         _showZoomImageDialog(ttdImage, "Tanda Tangan - ${item['nama_it']}");
                       },
                       child: Center(
@@ -1662,34 +1694,222 @@ class _ListReturPageState extends State<ListReturPage> {
   }
 
   Widget _buildDetailRow(String label, String value, bool isMobile) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 4),
-      child: Row(
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 4),
+    child: Row(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        SizedBox(
+          width: isMobile ? 100 : 120,
+          child: Text(
+            "$label:",
+            style: TextStyle(
+              fontWeight: FontWeight.bold,
+              fontSize: isMobile ? 12 : 14,
+            ),
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
+            style: TextStyle(fontSize: isMobile ? 12 : 14),
+          ),
+        ),
+      ],
+    ),
+  );
+}
+
+  // ================= SHIMMER LOADING EFFECT =================
+  Widget _buildShimmerLoading(bool isMobile) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          SizedBox(
-            width: isMobile ? 100 : 120,
-            child: Text(
-              "$label:",
-              style: TextStyle(
-                fontWeight: FontWeight.bold,
-                fontSize: isMobile ? 12 : 14,
+          // Header Shimmer
+          Container(
+            height: 80,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color: Colors.grey[200],
+            ),
+          ),
+          
+          const SizedBox(height: 20),
+          
+          // Summary Shimmer
+          Container(
+            height: 20,
+            width: 150,
+            color: Colors.grey[200],
+          ),
+          const SizedBox(height: 12),
+          
+          Card(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: List.generate(4, (index) => 
+                  Column(
+                    children: [
+                      Container(
+                        height: 15,
+                        width: 40,
+                        color: Colors.grey[200],
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        height: 40,
+                        width: 60,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
               ),
             ),
           ),
-          Expanded(
-            child: Text(
-              value,
-              style: TextStyle(fontSize: isMobile ? 12 : 14),
+          
+          const SizedBox(height: 20),
+          
+          // Filter Shimmer
+          Container(
+            height: 20,
+            width: 100,
+            color: Colors.grey[200],
+          ),
+          const SizedBox(height: 12),
+          
+          Card(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Column(
+                children: [
+                  Row(
+                    children: [
+                      CircleAvatar(backgroundColor: Colors.grey[200], radius: 10),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(height: 15, width: 80, color: Colors.grey[200]),
+                            const SizedBox(height: 4),
+                            Container(height: 40, width: double.infinity, color: Colors.grey[200]),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                  const SizedBox(height: 16),
+                  const Divider(),
+                  const SizedBox(height: 16),
+                  Row(
+                    children: [
+                      CircleAvatar(backgroundColor: Colors.grey[200], radius: 10),
+                      const SizedBox(width: 8),
+                      Expanded(
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            Container(height: 15, width: 60, color: Colors.grey[200]),
+                            const SizedBox(height: 4),
+                            Container(height: 40, width: double.infinity, color: Colors.grey[200]),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
             ),
           ),
+          
+          const SizedBox(height: 20),
+          
+          // List Shimmer
+          _buildListShimmer(isMobile),
         ],
+      ),
+    );
+  }
+
+  Widget _buildListShimmer(bool isMobile) {
+    return Column(
+      children: List.generate(5, (index) => 
+        Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: Padding(
+            padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
+            child: Row(
+              children: [
+                Container(
+                  width: isMobile ? 50 : 60,
+                  height: isMobile ? 50 : 60,
+                  decoration: BoxDecoration(
+                    color: Colors.grey[200],
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+                SizedBox(width: isMobile ? 8 : 12),
+                
+                Expanded(
+                  child: Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    children: [
+                      Container(height: 15, width: double.infinity, color: Colors.grey[200]),
+                      const SizedBox(height: 6),
+                      Container(height: 12, width: 150, color: Colors.grey[200]),
+                      const SizedBox(height: 6),
+                      Container(height: 10, width: 200, color: Colors.grey[200]),
+                    ],
+                  ),
+                ),
+                
+                Column(
+                  children: [
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Container(
+                      width: 40,
+                      height: 40,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(6),
+                      ),
+                    ),
+                  ],
+                ),
+              ],
+            ),
+          ),
+        ),
       ),
     );
   }
 }
 
-// ================= EDIT PAGE dengan FOTO LENGKAP =================
+// ================= EDIT PAGE tanpa TTD =================
 class EditReturPage extends StatefulWidget {
   final Map<String, dynamic> data;
   
@@ -1701,10 +1921,6 @@ class EditReturPage extends StatefulWidget {
 
 class _EditReturPageState extends State<EditReturPage> {
   final _formKey = GlobalKey<FormState>();
-  final SignatureController _signatureController = SignatureController(
-    penStrokeWidth: 3,
-    penColor: Colors.black,
-  );
   final ImagePicker _picker = ImagePicker();
   
   late TextEditingController _tanggalController;
@@ -1717,8 +1933,6 @@ class _EditReturPageState extends State<EditReturPage> {
   
   String _selectedKategori = 'OK';
   bool _isLoading = false;
-  Uint8List? _existingSignature;
-  bool _signatureChanged = false;
   
   // ✅ FOTO BARANG VARIABLES
   File? _newFotoBarang;
@@ -1736,15 +1950,6 @@ class _EditReturPageState extends State<EditReturPage> {
     _nomorDokumenController = TextEditingController(text: widget.data['nomor_dokumen'] ?? '');
     _keteranganController = TextEditingController(text: widget.data['keterangan'] ?? '');
     _selectedKategori = widget.data['kategori'] ?? 'OK';
-    
-    // Load existing signature
-    if (widget.data['ttd_base64'] != null && widget.data['ttd_base64'] != "") {
-      try {
-        _existingSignature = base64Decode(widget.data['ttd_base64']);
-      } catch (e) {
-        print('Error decoding signature: $e');
-      }
-    }
     
     // ✅ Load existing foto barang
     if (widget.data['foto_barang'] != null && widget.data['foto_barang'] != "") {
@@ -1765,7 +1970,6 @@ class _EditReturPageState extends State<EditReturPage> {
     _snBarangController.dispose();
     _nomorDokumenController.dispose();
     _keteranganController.dispose();
-    _signatureController.dispose();
     super.dispose();
   }
 
@@ -1827,7 +2031,7 @@ class _EditReturPageState extends State<EditReturPage> {
               width: 40,
               height: 4,
               decoration: BoxDecoration(
-                color: Colors.grey.shade300,
+                color: Colors.grey[300],
                 borderRadius: BorderRadius.circular(2),
               ),
             ),
@@ -1844,7 +2048,7 @@ class _EditReturPageState extends State<EditReturPage> {
               leading: Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.blue.shade50,
+                  color: Colors.blue[50],
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: const Icon(Icons.camera_alt, color: Colors.blue),
@@ -1861,7 +2065,7 @@ class _EditReturPageState extends State<EditReturPage> {
               leading: Container(
                 padding: const EdgeInsets.all(10),
                 decoration: BoxDecoration(
-                  color: Colors.purple.shade50,
+                  color: Colors.purple[50],
                   borderRadius: BorderRadius.circular(10),
                 ),
                 child: const Icon(Icons.photo_library, color: Colors.purple),
@@ -1920,17 +2124,6 @@ class _EditReturPageState extends State<EditReturPage> {
     });
 
     try {
-      String? ttdBase64;
-      
-      // Handle signature
-      if (_signatureChanged && _signatureController.isNotEmpty) {
-        final signature = await _signatureController.toPngBytes();
-        ttdBase64 = base64Encode(signature!);
-      } else if (_existingSignature != null && !_signatureChanged) {
-        // Jangan kirim ttd_base64 jika tidak berubah (biar API tidak update)
-        ttdBase64 = null;
-      }
-
       // ✅ Handle foto barang
       String? fotoBase64;
       if (_fotoChanged) {
@@ -1959,11 +2152,6 @@ class _EditReturPageState extends State<EditReturPage> {
         'kategori': _selectedKategori,
         'keterangan': _keteranganController.text,
       };
-
-      // Hanya kirim ttd_base64 jika berubah
-      if (ttdBase64 != null) {
-        requestBody['ttd_base64'] = ttdBase64;
-      }
 
       // Hanya kirim foto_barang jika berubah
       if (fotoBase64 != null) {
@@ -2007,7 +2195,7 @@ class _EditReturPageState extends State<EditReturPage> {
             Expanded(child: Text(message)),
           ],
         ),
-        backgroundColor: Colors.green.shade400,
+        backgroundColor: Colors.green[400],
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         margin: const EdgeInsets.all(16),
@@ -2025,7 +2213,7 @@ class _EditReturPageState extends State<EditReturPage> {
             Expanded(child: Text(message)),
           ],
         ),
-        backgroundColor: Colors.red.shade400,
+        backgroundColor: Colors.red[400],
         behavior: SnackBarBehavior.floating,
         shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
         margin: const EdgeInsets.all(16),
@@ -2110,7 +2298,7 @@ class _EditReturPageState extends State<EditReturPage> {
                 decoration: BoxDecoration(
                   color: Colors.white,
                   borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey.shade300),
+                  border: Border.all(color: Colors.grey[300]!),
                 ),
                 child: DropdownButton<String>(
                   value: _selectedKategori,
@@ -2156,7 +2344,7 @@ class _EditReturPageState extends State<EditReturPage> {
                     Container(
                       height: isMobile ? 200 : 250,
                       decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade300),
+                        border: Border.all(color: Colors.grey[300]!),
                         borderRadius: BorderRadius.circular(12),
                         color: Colors.white,
                       ),
@@ -2205,7 +2393,7 @@ class _EditReturPageState extends State<EditReturPage> {
                     Container(
                       height: isMobile ? 200 : 250,
                       decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade300),
+                        border: Border.all(color: Colors.grey[300]!),
                         borderRadius: BorderRadius.circular(12),
                         color: Colors.white,
                       ),
@@ -2265,12 +2453,12 @@ class _EditReturPageState extends State<EditReturPage> {
                     height: isMobile ? 150 : 180,
                     decoration: BoxDecoration(
                       border: Border.all(
-                        color: Colors.grey.shade300,
+                        color: Colors.grey[300]!,
                         width: 2,
                         style: BorderStyle.solid,
                       ),
                       borderRadius: BorderRadius.circular(12),
-                      color: Colors.grey.shade50,
+                      color: Colors.grey[50]!,
                     ),
                     child: Center(
                       child: Column(
@@ -2279,13 +2467,13 @@ class _EditReturPageState extends State<EditReturPage> {
                           Icon(
                             Icons.add_photo_alternate_outlined,
                             size: 48,
-                            color: Colors.grey.shade400,
+                            color: Colors.grey[400],
                           ),
                           const SizedBox(height: 12),
                           Text(
                             "Tambah Foto Barang",
                             style: TextStyle(
-                              color: Colors.grey.shade600,
+                              color: Colors.grey[600],
                               fontSize: 14,
                               fontWeight: FontWeight.w500,
                             ),
@@ -2294,7 +2482,7 @@ class _EditReturPageState extends State<EditReturPage> {
                           Text(
                             "Tap untuk memilih foto",
                             style: TextStyle(
-                              color: Colors.grey.shade500,
+                              color: Colors.grey[500],
                               fontSize: 12,
                             ),
                           ),
@@ -2302,97 +2490,6 @@ class _EditReturPageState extends State<EditReturPage> {
                       ),
                     ),
                   ),
-                ),
-              
-              // Signature Section
-              const SizedBox(height: 20),
-              Text(
-                "Tanda Tangan",
-                style: TextStyle(
-                  fontWeight: FontWeight.w600, 
-                  fontSize: isMobile ? 12 : 14
-                ),
-              ),
-              const SizedBox(height: 8),
-              
-              if (_existingSignature != null && !_signatureChanged)
-                Column(
-                  children: [
-                    Container(
-                      height: isMobile ? 150 : 200,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade300),
-                        borderRadius: BorderRadius.circular(12),
-                        color: Colors.white,
-                      ),
-                      child: Center(
-                        child: Image.memory(_existingSignature!, height: isMobile ? 130 : 180),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    ElevatedButton.icon(
-                      onPressed: () {
-                        setState(() {
-                          _signatureChanged = true;
-                        });
-                      },
-                      icon: const Icon(Icons.edit),
-                      label: Text("Ubah Tanda Tangan", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                      style: ElevatedButton.styleFrom(
-                        backgroundColor: Colors.orange,
-                        foregroundColor: Colors.white,
-                      ),
-                    ),
-                  ],
-                )
-              else
-                Column(
-                  children: [
-                    Container(
-                      height: isMobile ? 150 : 200,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey.shade300),
-                        borderRadius: BorderRadius.circular(12),
-                        color: Colors.white,
-                      ),
-                      child: Signature(
-                        controller: _signatureController,
-                        backgroundColor: Colors.white,
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        if (_existingSignature != null)
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: () {
-                                setState(() {
-                                  _signatureChanged = false;
-                                  _signatureController.clear();
-                                });
-                              },
-                              icon: const Icon(Icons.cancel),
-                              label: Text("Batal Ubah", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            ),
-                          ),
-                        if (_existingSignature != null) const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              _signatureController.clear();
-                            },
-                            icon: const Icon(Icons.clear),
-                            label: Text("Hapus", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
                 ),
               
               const SizedBox(height: 30),
@@ -2467,11 +2564,11 @@ class _EditReturPageState extends State<EditReturPage> {
             fillColor: Colors.white,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: Colors.grey.shade300),
+              borderSide: BorderSide(color: Colors.grey[300]!),
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
-              borderSide: BorderSide(color: Colors.grey.shade300),
+              borderSide: BorderSide(color: Colors.grey[300]!),
             ),
             focusedBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
