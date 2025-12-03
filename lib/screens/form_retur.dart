@@ -267,7 +267,7 @@ class _FormReturPageState extends State<FormReturPage> {
 
       try {
         final response = await http.post(
-          Uri.parse("http://192.168.0.110/returx/api/retur/insert.php"),
+          Uri.parse("http://sci.rotio.id:9050/returx/api/retur/insert.php"),
           headers: {"Content-Type": "application/json"},
           body: jsonEncode(data),
         );

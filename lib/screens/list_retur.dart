@@ -25,11 +25,16 @@ class _ListReturPageState extends State<ListReturPage> {
   bool _isLoading = false;
   bool _isFirstLoad = true;
 
-  // ✅ Cache untuk menghindari decode berulang
-  final Map<String, Uint8List?> _fotoCache = {};
-  final Map<String, Uint8List?> _ttdCache = {};
+  // ✅ Pagination variables
+  int _currentPage = 1;
+  int _totalPages = 1;
+  int _totalItems = 0;
+  final int _itemsPerPage = 50;
+  bool _hasMoreData = true;
 
-  // ✅ Date Filter Variables - DEFAULT HARI INI
+  // ✅ Cache untuk detail items (baru load ketika dibutuhkan)
+  final Map<int, Map<String, dynamic>> _detailCache = {};
+
   DateTime? _selectedDate;
 
   int _okCount = 0;
@@ -39,36 +44,44 @@ class _ListReturPageState extends State<ListReturPage> {
   @override
   void initState() {
     super.initState();
-    // Set default tanggal ke hari ini
     _selectedDate = DateTime.now();
     _loadData();
   }
 
-  Future<void> _loadData() async {
+  // ✅ OPTIMASI UTAMA: Load data TANPA gambar
+  Future<void> _loadData({bool append = false}) async {
+    if (_isLoading) return;
+    
     setState(() {
       _isLoading = true;
     });
 
     try {
-      // ✅ OPTIMASI: Format tanggal untuk filter server-side
       String tanggalParam = DateFormat('yyyy-MM-dd').format(_selectedDate!);
       
-      final response = await http.get(
-        Uri.parse("http://192.168.0.110/returx/api/retur/list.php?tanggal=$tanggalParam"),
-      );
+      // ✅ PENTING: Kirim filter ke server
+      final url = "http://sci.rotio.id:9050/returx/api/retur/list.php"
+          "?tanggal=$tanggalParam"
+          "&kategori=$_selectedKategori"
+          "&page=$_currentPage"
+          "&limit=$_itemsPerPage";
+      
+      final response = await http.get(Uri.parse(url));
 
       final result = jsonDecode(response.body);
       if (result['success'] == true) {
         List data = result['data'];
         
-        // Clear cache setiap load data baru
-        _fotoCache.clear();
-        _ttdCache.clear();
+        // ✅ Update pagination info
+        if (result['pagination'] != null) {
+          _totalPages = result['pagination']['total_pages'] ?? 1;
+          _totalItems = result['pagination']['total_items'] ?? 0;
+          _hasMoreData = _currentPage < _totalPages;
+        }
         
+        // ✅ Hitung summary (server bisa kirim ini juga untuk lebih optimal)
         int ok = 0, service = 0, waste = 0;
-
         for (var item in data) {
-          // Hitung kategori tanpa proses berat
           switch (item['kategori']) {
             case 'OK':
               ok++;
@@ -83,8 +96,13 @@ class _ListReturPageState extends State<ListReturPage> {
         }
 
         setState(() {
-          _allData = List<Map<String, dynamic>>.from(data);
-          _applyFilters();
+          if (append) {
+            _allData.addAll(List<Map<String, dynamic>>.from(data));
+          } else {
+            _allData = List<Map<String, dynamic>>.from(data);
+            _detailCache.clear(); // Clear cache ketika reload
+          }
+          _filteredData = _allData;
           _okCount = ok;
           _serviceCount = service;
           _wasteCount = waste;
@@ -111,80 +129,48 @@ class _ListReturPageState extends State<ListReturPage> {
     }
   }
 
-  DateTime? _parseDate(String dateStr) {
-    if (dateStr.isEmpty) return null;
+  // ✅ Load next page (infinite scroll)
+  Future<void> _loadMoreData() async {
+    if (!_hasMoreData || _isLoading) return;
     
-    // ✅ OPTIMASI: Coba format yang paling umum dulu
+    _currentPage++;
+    await _loadData(append: true);
+  }
+
+  // ✅ Load detail dengan gambar (on-demand)
+  Future<Map<String, dynamic>?> _loadDetailData(int id) async {
+    // Check cache first
+    if (_detailCache.containsKey(id)) {
+      return _detailCache[id];
+    }
+
     try {
-      // Format yyyy-MM-dd (format umum dari database)
-      final parts = dateStr.split('-');
-      if (parts.length == 3) {
-        final year = int.tryParse(parts[0]);
-        final month = int.tryParse(parts[1]);
-        final day = int.tryParse(parts[2]);
-        if (year != null && month != null && day != null) {
-          return DateTime(year, month, day);
-        }
+      final response = await http.get(
+        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/detail.php?id=$id"),
+      );
+
+      final result = jsonDecode(response.body);
+      if (result['success'] == true) {
+        _detailCache[id] = result['data'];
+        return result['data'];
       }
     } catch (e) {
-      // Coba format lain
+      print('Error loading detail: $e');
     }
-    
-    // Fallback ke DateFormat hanya jika diperlukan
-    try {
-      // Coba format dd/MM/yyyy
-      final parts = dateStr.split('/');
-      if (parts.length == 3) {
-        final day = int.tryParse(parts[0]);
-        final month = int.tryParse(parts[1]);
-        final year = int.tryParse(parts[2]);
-        if (year != null && month != null && day != null) {
-          // Handle tahun 2 digit
-          final fullYear = year < 100 ? 2000 + year : year;
-          return DateTime(fullYear, month, day);
-        }
-      }
-    } catch (e) {
-      return null;
-    }
-    
     return null;
   }
 
   void _applyFilters() {
-    List<Map<String, dynamic>> filtered = _allData;
-
-    // Filter by kategori
-    if (_selectedKategori != 'All') {
-      filtered = filtered.where((e) => e['kategori'] == _selectedKategori).toList();
-    }
-
-    // Filter by specific date
-    if (_selectedDate != null) {
-      final normalizedSelected = DateTime(_selectedDate!.year, _selectedDate!.month, _selectedDate!.day);
-      
-      filtered = filtered.where((item) {
-        String tanggalStr = item['tanggal'] ?? '';
-        if (tanggalStr.isEmpty) return false;
-
-        final itemDate = _parseDate(tanggalStr);
-        if (itemDate == null) return false;
-
-        bool matches = itemDate.year == normalizedSelected.year &&
-                       itemDate.month == normalizedSelected.month &&
-                       itemDate.day == normalizedSelected.day;
-        
-        return matches;
-      }).toList();
-    }
-
-    setState(() {
-      _filteredData = filtered;
-    });
+    // Reset pagination
+    _currentPage = 1;
+    _hasMoreData = true;
+    _loadData();
   }
 
   void _filterKategori(String kategori) {
-    _selectedKategori = kategori;
+    setState(() {
+      _selectedKategori = kategori;
+    });
     _applyFilters();
   }
 
@@ -213,28 +199,38 @@ class _ListReturPageState extends State<ListReturPage> {
       setState(() {
         _selectedDate = picked;
       });
-      _loadData();
+      _applyFilters();
     }
   }
 
   void _clearDateFilter() {
     setState(() {
-      _selectedDate = DateTime.now(); // Reset ke hari ini
+      _selectedDate = DateTime.now();
     });
-    _loadData();
+    _applyFilters();
   }
 
   // ================= EDIT DATA =================
   Future<void> _editData(Map<String, dynamic> item) async {
+    // ✅ Load detail dulu jika belum ada
+    Map<String, dynamic>? detailData = await _loadDetailData(int.parse(item['id'].toString()));
+    
+    if (detailData == null) {
+      _showErrorSnackBar("Gagal memuat detail data");
+      return;
+    }
+
     final result = await Navigator.push(
       context,
       MaterialPageRoute(
-        builder: (context) => EditReturPage(data: item),
+        builder: (context) => EditReturPage(data: detailData),
       ),
     );
 
     if (result == true) {
-      _loadData();
+      // Clear cache untuk item ini
+      _detailCache.remove(item['id']);
+      _applyFilters();
       _showSuccessSnackBar("Data berhasil diupdate!");
     }
   }
@@ -270,14 +266,15 @@ class _ListReturPageState extends State<ListReturPage> {
 
     try {
       final response = await http.post(
-        Uri.parse("http://192.168.0.110/returx/api/retur/delete.php"),
+        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/delete.php"),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode({'id': item['id']}),
       );
 
       final result = jsonDecode(response.body);
       if (result['success'] == true) {
-        _loadData();
+        _detailCache.remove(item['id']);
+        _applyFilters();
         _showSuccessSnackBar("Data berhasil dihapus");
       } else {
         _showErrorSnackBar("Gagal menghapus: ${result['message']}");
@@ -301,7 +298,7 @@ class _ListReturPageState extends State<ListReturPage> {
               children: [
                 CircularProgressIndicator(),
                 SizedBox(height: 16),
-                Text('Mengirim ke printer...'),
+                Text('Memuat data untuk print...'),
               ],
             ),
           ),
@@ -310,9 +307,17 @@ class _ListReturPageState extends State<ListReturPage> {
     );
 
     try {
-      bool connected = await PrinterService.ensureConnected();
+      // ✅ Load detail data dulu (dengan gambar)
+      Map<String, dynamic>? detailData = await _loadDetailData(int.parse(item['id'].toString()));
       
       if (mounted) Navigator.pop(context);
+      
+      if (detailData == null) {
+        _showErrorSnackBar("Gagal memuat data");
+        return;
+      }
+
+      bool connected = await PrinterService.ensureConnected();
       
       if (!connected) {
         _showWarningSnackBar("Printer belum terhubung");
@@ -320,20 +325,20 @@ class _ListReturPageState extends State<ListReturPage> {
       }
 
       Uint8List? ttdImage;
-      if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
-        ttdImage = base64Decode(item['ttd_base64']);
+      if (detailData['ttd_base64'] != null && detailData['ttd_base64'] != "") {
+        ttdImage = base64Decode(detailData['ttd_base64']);
       }
 
       final returBarang = ReturBarang(
-        tanggal: item['tanggal'] ?? '',
-        namaToko: item['nama_toko'] ?? '',
-        namaIT: item['nama_it'] ?? '',
-        namaBarang: item['nama_barang'] ?? '',
-        snBarang: item['sn_barang'] ?? '',
-        nomorDokumen: item['nomor_dokumen'] ?? '',
-        kategori: item['kategori'] ?? '',
-        keterangan: item['keterangan'] ?? '',
-        ttdBase64: item['ttd_base64'],
+        tanggal: detailData['tanggal'] ?? '',
+        namaToko: detailData['nama_toko'] ?? '',
+        namaIT: detailData['nama_it'] ?? '',
+        namaBarang: detailData['nama_barang'] ?? '',
+        snBarang: detailData['sn_barang'] ?? '',
+        nomorDokumen: detailData['nomor_dokumen'] ?? '',
+        kategori: detailData['kategori'] ?? '',
+        keterangan: detailData['keterangan'] ?? '',
+        ttdBase64: detailData['ttd_base64'],
       );
 
       await PrinterService.printRetur(returBarang, ttdImage: ttdImage);
@@ -411,21 +416,25 @@ class _ListReturPageState extends State<ListReturPage> {
       for (int i = 0; i < _filteredData.length; i++) {
         final item = _filteredData[i];
         
+        // ✅ Load detail untuk setiap item
+        Map<String, dynamic>? detailData = await _loadDetailData(int.parse(item['id'].toString()));
+        if (detailData == null) continue;
+        
         Uint8List? ttdImage;
-        if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
-          ttdImage = base64Decode(item['ttd_base64']);
+        if (detailData['ttd_base64'] != null && detailData['ttd_base64'] != "") {
+          ttdImage = base64Decode(detailData['ttd_base64']);
         }
 
         final returBarang = ReturBarang(
-          tanggal: item['tanggal'] ?? '',
-          namaToko: item['nama_toko'] ?? '',
-          namaIT: item['nama_it'] ?? '',
-          namaBarang: item['nama_barang'] ?? '',
-          snBarang: item['sn_barang'] ?? '',
-          nomorDokumen: item['nomor_dokumen'] ?? '',
-          kategori: item['kategori'] ?? '',
-          keterangan: item['keterangan'] ?? '',
-          ttdBase64: item['ttd_base64'],
+          tanggal: detailData['tanggal'] ?? '',
+          namaToko: detailData['nama_toko'] ?? '',
+          namaIT: detailData['nama_it'] ?? '',
+          namaBarang: detailData['nama_barang'] ?? '',
+          snBarang: detailData['sn_barang'] ?? '',
+          nomorDokumen: detailData['nomor_dokumen'] ?? '',
+          kategori: detailData['kategori'] ?? '',
+          keterangan: detailData['keterangan'] ?? '',
+          ttdBase64: detailData['ttd_base64'],
         );
 
         await PrinterService.printRetur(returBarang, ttdImage: ttdImage);
@@ -443,58 +452,42 @@ class _ListReturPageState extends State<ListReturPage> {
     }
   }
 
-  // ================= FOTO BARANG UTILS dengan CACHE =================
-  Uint8List? _getCachedFotoBarang(String id, String? fotoBase64) {
-    if (fotoBase64 == null || fotoBase64.isEmpty) {
-      return null;
-    }
+  // ✅ Indicator untuk has_foto dan has_ttd
+  Widget _buildItemImage(Map<String, dynamic> item) {
+    bool hasFoto = item['has_foto'] == 1;
     
-    // Cek cache dulu
-    if (_fotoCache.containsKey(id)) {
-      return _fotoCache[id];
-    }
-    
-    // Decode dan cache
-    try {
-      final decoded = base64Decode(fotoBase64);
-      _fotoCache[id] = decoded;
-      return decoded;
-    } catch (e) {
-      print('Error decoding foto barang: $e');
-      _fotoCache[id] = null;
-      return null;
-    }
-  }
-
-  Uint8List? _getCachedTTD(String id, String? ttdBase64) {
-    if (ttdBase64 == null || ttdBase64.isEmpty) {
-      return null;
-    }
-    
-    // Cek cache dulu
-    if (_ttdCache.containsKey(id)) {
-      return _ttdCache[id];
-    }
-    
-    // Decode dan cache
-    try {
-      final decoded = base64Decode(ttdBase64);
-      _ttdCache[id] = decoded;
-      return decoded;
-    } catch (e) {
-      print('Error decoding TTD: $e');
-      _ttdCache[id] = null;
-      return null;
-    }
-  }
-
-  // MODIFIED: Hanya tampilkan icon, bukan gambar
-  Widget _buildItemImage() {
-    return Center(
-      child: Icon(
-        Icons.inventory_2_outlined,
-        size: 32,
-        color: Colors.grey.shade400,
+    return Container(
+      decoration: BoxDecoration(
+        color: hasFoto ? Colors.blue.shade50 : Colors.grey.shade100,
+        borderRadius: BorderRadius.circular(8),
+      ),
+      child: Stack(
+        children: [
+          Center(
+            child: Icon(
+              Icons.inventory_2_outlined,
+              size: 32,
+              color: hasFoto ? Colors.blue : Colors.grey.shade400,
+            ),
+          ),
+          if (hasFoto)
+            Positioned(
+              top: 4,
+              right: 4,
+              child: Container(
+                padding: const EdgeInsets.all(2),
+                decoration: const BoxDecoration(
+                  color: Colors.blue,
+                  shape: BoxShape.circle,
+                ),
+                child: const Icon(
+                  Icons.check,
+                  color: Colors.white,
+                  size: 12,
+                ),
+              ),
+            ),
+        ],
       ),
     );
   }
@@ -509,7 +502,6 @@ class _ListReturPageState extends State<ListReturPage> {
         child: Column(
           mainAxisSize: MainAxisSize.min,
           children: [
-            // Header dengan tombol close
             Container(
               decoration: BoxDecoration(
                 color: Colors.black.withOpacity(0.7),
@@ -522,12 +514,14 @@ class _ListReturPageState extends State<ListReturPage> {
               child: Row(
                 mainAxisAlignment: MainAxisAlignment.spaceBetween,
                 children: [
-                  Text(
-                    title,
-                    style: const TextStyle(
-                      color: Colors.white,
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
+                  Expanded(
+                    child: Text(
+                      title,
+                      style: const TextStyle(
+                        color: Colors.white,
+                        fontSize: 16,
+                        fontWeight: FontWeight.bold,
+                      ),
                     ),
                   ),
                   IconButton(
@@ -537,7 +531,6 @@ class _ListReturPageState extends State<ListReturPage> {
                 ],
               ),
             ),
-            // Gambar dengan interactive viewer
             Expanded(
               child: InteractiveViewer(
                 panEnabled: true,
@@ -550,7 +543,6 @@ class _ListReturPageState extends State<ListReturPage> {
                 ),
               ),
             ),
-            // Footer dengan instruksi
             Container(
               decoration: BoxDecoration(
                 color: Colors.black.withOpacity(0.7),
@@ -561,7 +553,7 @@ class _ListReturPageState extends State<ListReturPage> {
               ),
               padding: const EdgeInsets.all(8),
               child: const Text(
-                'Pinch untuk zoom • Drag untuk geser • Tap untuk close',
+                'Pinch untuk zoom • Drag untuk geser',
                 style: TextStyle(
                   color: Colors.white70,
                   fontSize: 12,
@@ -582,39 +574,66 @@ class _ListReturPageState extends State<ListReturPage> {
       return;
     }
 
+    showDialog(
+      context: context,
+      barrierDismissible: false,
+      builder: (context) => const Center(
+        child: Card(
+          child: Padding(
+            padding: EdgeInsets.all(20),
+            child: Column(
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                CircularProgressIndicator(),
+                SizedBox(height: 16),
+                Text('Membuat PDF...'),
+              ],
+            ),
+          ),
+        ),
+      ),
+    );
+
     final pdf = pw.Document();
 
-    final List<pw.TableRow> rows = _filteredData.map((item) {
+    final List<pw.TableRow> rows = [];
+    
+    // ✅ Load detail untuk setiap item (untuk PDF)
+    for (var item in _filteredData) {
+      Map<String, dynamic>? detailData = await _loadDetailData(int.parse(item['id'].toString()));
+      if (detailData == null) continue;
+
       pw.Widget ttdWidget;
-      if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
-        final Uint8List bytes = base64Decode(item['ttd_base64']);
+      if (detailData['ttd_base64'] != null && detailData['ttd_base64'] != "") {
+        final Uint8List bytes = base64Decode(detailData['ttd_base64']);
         ttdWidget = pw.Image(pw.MemoryImage(bytes), width: 50, height: 50);
       } else {
         ttdWidget = pw.Text("-");
       }
 
-      // ✅ FOTO BARANG WIDGET
       pw.Widget fotoWidget;
-      final fotoBarang = _getCachedFotoBarang(item['id'].toString(), item['foto_barang']);
-      if (fotoBarang != null) {
-        fotoWidget = pw.Image(pw.MemoryImage(fotoBarang), width: 50, height: 50);
+      if (detailData['foto_barang'] != null && detailData['foto_barang'] != "") {
+        final Uint8List bytes = base64Decode(detailData['foto_barang']);
+        fotoWidget = pw.Image(pw.MemoryImage(bytes), width: 50, height: 50);
       } else {
         fotoWidget = pw.Text("-");
       }
 
-      return pw.TableRow(children: [
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['tanggal'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['nama_toko'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['nama_barang'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['sn_barang'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['nomor_dokumen'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['nama_it'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['kategori'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
-        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(item['keterangan'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
+      rows.add(pw.TableRow(children: [
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['tanggal'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['nama_toko'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['nama_barang'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['sn_barang'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['nomor_dokumen'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['nama_it'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['kategori'] ?? '-', style: const pw.TextStyle(fontSize: 9))),
+        pw.Padding(padding: const pw.EdgeInsets.all(4), child: pw.Text(detailData['keterangan'] ?? '-', style: const pw.TextStyle(fontSize: 8))),
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: fotoWidget),
         pw.Padding(padding: const pw.EdgeInsets.all(4), child: ttdWidget),
-      ]);
-    }).toList();
+      ]));
+    }
+
+    if (mounted) Navigator.pop(context);
 
     String dateFilterText = '';
     if (_selectedDate != null) {
@@ -636,7 +655,7 @@ class _ListReturPageState extends State<ListReturPage> {
           pw.Bullet(text: 'OK: $_okCount'),
           pw.Bullet(text: 'Service: $_serviceCount'),
           pw.Bullet(text: 'Waste: $_wasteCount'),
-          pw.Bullet(text: 'Total: ${_allData.length}'),
+          pw.Bullet(text: 'Total: $_totalItems'),
           pw.SizedBox(height: 12),
           pw.Text('Filter Kategori: $_selectedKategori', style: pw.TextStyle(fontSize: 12, fontStyle: pw.FontStyle.italic)),
           if (dateFilterText.isNotEmpty)
@@ -726,601 +745,249 @@ class _ListReturPageState extends State<ListReturPage> {
     );
   }
 
-  // ================= BUILD dengan SHIMMER LOADING =================
+  // ================= BUILD =================
   @override
   Widget build(BuildContext context) {
     final bool isMobile = MediaQuery.of(context).size.width < 600;
     
     return Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
-      appBar: AppBar(
-        elevation: 0,
-        backgroundColor: Colors.white,
-        foregroundColor: Colors.black,
-        title: Row(
-          children: [
-            Container(
-              padding: const EdgeInsets.all(8),
-              decoration: BoxDecoration(
-                color: const Color(0xFF667eea).withOpacity(0.1),
-                borderRadius: BorderRadius.circular(10),
-              ),
-              child: const Icon(
-                Icons.list_alt_rounded,
-                color: Color(0xFF667eea),
-                size: 24,
-              ),
-            ),
-            const SizedBox(width: 12),
-            Expanded(
-              child: isMobile
-                  ? const Column(
-                      crossAxisAlignment: CrossAxisAlignment.start,
-                      mainAxisSize: MainAxisSize.min,
-                      children: [
-                        Text(
-                          "Daftar Retur",
-                          style: TextStyle(
-                            color: Colors.black,
-                            fontWeight: FontWeight.bold,
-                            fontSize: 18,
-                          ),
-                        ),
-                        Text(
-                          "Laporan data retur",
-                          style: TextStyle(
-                            color: Colors.grey,
-                            fontSize: 12,
-                            fontWeight: FontWeight.normal,
-                          ),
-                        ),
-                      ],
-                    )
-                  : const Text(
-                      "Daftar Retur Barang",
-                      style: TextStyle(
-                        color: Colors.black,
-                        fontWeight: FontWeight.bold,
-                        fontSize: 18,
-                      ),
-                    ),
-            ),
-          ],
-        ),
-        actions: [
-          // Refresh Button
-          IconButton(
-            icon: const Icon(Icons.refresh, color: Colors.green, size: 22),
-            tooltip: "Refresh Data",
-            onPressed: _loadData,
-          ),
-          // Print Button
-          IconButton(
-            icon: const Icon(Icons.print, color: Colors.orange, size: 22),
-            tooltip: "Print Semua",
-            onPressed: _filteredData.isEmpty ? null : _printAllData,
-          ),
-          // PDF Button
-          IconButton(
-            icon: const Icon(Icons.picture_as_pdf, color: Colors.red, size: 22),
-            tooltip: "Laporan PDF",
-            onPressed: _filteredData.isEmpty ? null : _generatePdfReport,
-          ),
-        ],
-      ),
+      appBar: _buildAppBar(isMobile),
       body: _isLoading && _isFirstLoad
           ? _buildShimmerLoading(isMobile)
-          : SingleChildScrollView(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  // Header Info Box
-                  Container(
-                    padding: const EdgeInsets.all(16),
-                    decoration: BoxDecoration(
-                      gradient: const LinearGradient(
-                        colors: [Color(0xFF667eea), Color(0xFF764ba2)],
-                        begin: Alignment.topLeft,
-                        end: Alignment.bottomRight,
+          : NotificationListener<ScrollNotification>(
+              onNotification: (ScrollNotification scrollInfo) {
+                // ✅ Infinite scroll
+                if (!_isLoading &&
+                    _hasMoreData &&
+                    scrollInfo.metrics.pixels >= scrollInfo.metrics.maxScrollExtent - 200) {
+                  _loadMoreData();
+                }
+                return false;
+              },
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(16.0),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    _buildHeaderInfo(isMobile),
+                    const SizedBox(height: 20),
+                    _buildSummaryCard(isMobile),
+                    const SizedBox(height: 20),
+                    _buildFilterCard(isMobile),
+                    const SizedBox(height: 20),
+                    _buildDataCountHeader(isMobile),
+                    const SizedBox(height: 12),
+                    _buildDataList(isMobile),
+                    
+                    // ✅ Load more indicator
+                    if (_isLoading && !_isFirstLoad)
+                      const Padding(
+                        padding: EdgeInsets.all(16.0),
+                        child: Center(child: CircularProgressIndicator()),
                       ),
-                      borderRadius: BorderRadius.circular(16),
-                      boxShadow: [
-                        BoxShadow(
-                          color: const Color(0xFF667eea).withOpacity(0.3),
-                          blurRadius: 12,
-                          offset: const Offset(0, 4),
-                        ),
-                      ],
-                    ),
-                    child: Row(
-                      children: [
-                        Container(
-                          padding: const EdgeInsets.all(12),
-                          decoration: BoxDecoration(
-                            color: Colors.white.withOpacity(0.2),
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: const Icon(
-                            Icons.info_outline,
-                            color: Colors.white,
-                            size: 28,
-                          ),
-                        ),
-                        const SizedBox(width: 12),
-                        Expanded(
+                    
+                    // ✅ End of data indicator
+                    if (!_hasMoreData && _filteredData.isNotEmpty)
+                      Padding(
+                        padding: const EdgeInsets.all(16.0),
+                        child: Center(
                           child: Text(
-                            "Data retur akan ditampilkan berdasarkan filter kategori dan tanggal yang dipilih",
+                            "Semua data sudah dimuat",
                             style: TextStyle(
-                              color: Colors.white,
-                              fontSize: isMobile ? 12 : 14,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ),
-                  
-                  const SizedBox(height: 20),
-                  
-                  // Summary Card
-                  const Text(
-                    "Summary Retur",
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF667eea),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  
-                  Card(
-                    elevation: 2,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: isMobile 
-                          ? Column(
-                              children: [
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                                  children: [
-                                    _buildSummaryItem("OK", _okCount, Colors.green),
-                                    _buildSummaryItem("Service", _serviceCount, Colors.orange),
-                                  ],
-                                ),
-                                const SizedBox(height: 12),
-                                Row(
-                                  mainAxisAlignment: MainAxisAlignment.spaceAround,
-                                  children: [
-                                    _buildSummaryItem("Waste", _wasteCount, Colors.red),
-                                    _buildSummaryItem("Total", _allData.length, Colors.blue),
-                                  ],
-                                ),
-                              ],
-                            )
-                          : Row(
-                              mainAxisAlignment: MainAxisAlignment.spaceAround,
-                              children: [
-                                _buildSummaryItem("OK", _okCount, Colors.green),
-                                _buildSummaryItem("Service", _serviceCount, Colors.orange),
-                                _buildSummaryItem("Waste", _wasteCount, Colors.red),
-                                _buildSummaryItem("Total", _allData.length, Colors.blue),
-                              ],
-                            ),
-                    ),
-                  ),
-                  
-                  const SizedBox(height: 20),
-                  
-                  // Filter Section
-                  const Text(
-                    "Filter Data",
-                    style: TextStyle(
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                      color: Color(0xFF667eea),
-                    ),
-                  ),
-                  const SizedBox(height: 12),
-                  
-                  Card(
-                    elevation: 2,
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-                    child: Padding(
-                      padding: const EdgeInsets.all(16.0),
-                      child: Column(
-                        crossAxisAlignment: CrossAxisAlignment.start,
-                        children: [
-                          // Kategori Filter
-                          Row(
-                            children: [
-                              const Icon(Icons.filter_list, size: 20, color: Color(0xFF667eea)),
-                              const SizedBox(width: 8),
-                              Text(
-                                "Kategori:",
-                                style: TextStyle(
-                                  fontSize: isMobile ? 12 : 14,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.black87,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12),
-                                  decoration: BoxDecoration(
-                                    color: Colors.grey.shade100,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: Colors.grey.shade300),
-                                  ),
-                                  child: DropdownButton<String>(
-                                    value: _selectedKategori,
-                                    underline: const SizedBox(),
-                                    isExpanded: true,
-                                    style: TextStyle(fontSize: isMobile ? 12 : 14, color: Colors.black87),
-                                    items: const [
-                                      DropdownMenuItem(value: 'All', child: Text('Semua Kategori')),
-                                      DropdownMenuItem(value: 'OK', child: Text('OK')),
-                                      DropdownMenuItem(value: 'Service', child: Text('Service')),
-                                      DropdownMenuItem(value: 'Waste', child: Text('Waste')),
-                                    ],
-                                    onChanged: (v) {
-                                      if (v != null) _filterKategori(v);
-                                    },
-                                  ),
-                                ),
-                              ),
-                            ],
-                          ),
-                          
-                          const SizedBox(height: 16),
-                          const Divider(height: 1),
-                          const SizedBox(height: 16),
-                          
-                          // Date Filter (DEFAULT HARI INI)
-                          Row(
-                            children: [
-                              const Icon(Icons.calendar_today, size: 20, color: Color(0xFF667eea)),
-                              const SizedBox(width: 8),
-                              Text(
-                                "Tanggal:",
-                                style: TextStyle(
-                                  fontSize: isMobile ? 12 : 14,
-                                  fontWeight: FontWeight.w600,
-                                  color: Colors.black87,
-                                ),
-                              ),
-                              const SizedBox(width: 12),
-                              Expanded(
-                                child: Container(
-                                  padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
-                                  decoration: BoxDecoration(
-                                    color: Colors.blue.shade50,
-                                    borderRadius: BorderRadius.circular(8),
-                                    border: Border.all(color: Colors.blue.shade200),
-                                  ),
-                                  child: Row(
-                                    children: [
-                                      Expanded(
-                                        child: Text(
-                                          DateFormat('dd MMM yyyy').format(_selectedDate!),
-                                          style: TextStyle(
-                                            fontSize: isMobile ? 12 : 14,
-                                            fontWeight: FontWeight.w500,
-                                            color: Colors.blue.shade700,
-                                          ),
-                                        ),
-                                      ),
-                                      InkWell(
-                                        onTap: _clearDateFilter,
-                                        child: Icon(
-                                          Icons.close,
-                                          size: 18,
-                                          color: Colors.blue.shade700,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              ),
-                              const SizedBox(width: 8),
-                              ElevatedButton(
-                                onPressed: _selectDate,
-                                style: ElevatedButton.styleFrom(
-                                  backgroundColor: const Color(0xFF667eea),
-                                  foregroundColor: Colors.white,
-                                  padding: EdgeInsets.symmetric(
-                                    horizontal: isMobile ? 12 : 16, 
-                                    vertical: isMobile ? 10 : 12,
-                                  ),
-                                  shape: RoundedRectangleBorder(
-                                    borderRadius: BorderRadius.circular(8),
-                                  ),
-                                ),
-                                child: Icon(
-                                  Icons.calendar_month, 
-                                  size: isMobile ? 18 : 20
-                                ),
-                              ),
-                            ],
-                          ),
-                          const SizedBox(height: 8),
-                          Text(
-                            "Default: Data hari ini. Klik X untuk reset ke hari ini",
-                            style: TextStyle(
-                              fontSize: isMobile ? 10 : 11,
                               color: Colors.grey.shade600,
-                              fontStyle: FontStyle.italic,
+                              fontSize: 12,
                             ),
-                          ),
-                        ],
-                      ),
-                    ),
-                  ),
-                  
-                  const SizedBox(height: 20),
-                  
-                  // Data Count
-                  Row(
-                    mainAxisAlignment: MainAxisAlignment.spaceBetween,
-                    children: [
-                      Text(
-                        "Daftar Data",
-                        style: TextStyle(
-                          fontSize: isMobile ? 14 : 16,
-                          fontWeight: FontWeight.bold,
-                          color: const Color(0xFF667eea),
-                        ),
-                      ),
-                      Container(
-                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
-                        decoration: BoxDecoration(
-                          color: Colors.blue.shade50,
-                          borderRadius: BorderRadius.circular(20),
-                          border: Border.all(color: Colors.blue.shade200),
-                        ),
-                        child: Text(
-                          "${_filteredData.length} data",
-                          style: TextStyle(
-                            color: Colors.blue.shade700,
-                            fontSize: isMobile ? 10 : 12,
-                            fontWeight: FontWeight.w600,
                           ),
                         ),
                       ),
-                    ],
-                  ),
-                  const SizedBox(height: 12),
-                  
-                  // List Data
-                  if (_isLoading && !_isFirstLoad)
-                    _buildListShimmer(isMobile)
-                  else if (_filteredData.isEmpty)
-                    Container(
-                      height: 300,
-                      alignment: Alignment.center,
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: [
-                          Icon(Icons.inbox, size: 64, color: Colors.grey.shade400),
-                          const SizedBox(height: 16),
-                          Text(
-                            _selectedDate != null
-                                ? "Tidak ada data pada tanggal\n${DateFormat('dd MMM yyyy').format(_selectedDate!)}"
-                                : "Belum ada data retur",
-                            style: TextStyle(
-                              color: Colors.grey.shade600, 
-                              fontSize: isMobile ? 14 : 16,
-                            ),
-                            textAlign: TextAlign.center,
-                          ),
-                          if (_selectedDate != null) ...[
-                            const SizedBox(height: 16),
-                            ElevatedButton.icon(
-                              onPressed: _clearDateFilter,
-                              icon: const Icon(Icons.clear, size: 18),
-                              label: Text("Reset Filter", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                              style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF667eea),
-                                foregroundColor: Colors.white,
-                                padding: EdgeInsets.symmetric(
-                                  horizontal: isMobile ? 20 : 24, 
-                                  vertical: isMobile ? 10 : 12,
-                                ),
-                                shape: RoundedRectangleBorder(
-                                  borderRadius: BorderRadius.circular(8),
-                                ),
-                              ),
-                            ),
-                          ],
-                        ],
-                      ),
-                    )
-                  else
-                    ListView.builder(
-                      shrinkWrap: true,
-                      physics: const NeverScrollableScrollPhysics(),
-                      itemCount: _filteredData.length,
-                      itemBuilder: (context, index) {
-                        final item = _filteredData[index];
-
-                        // ✅ OPTIMASI: Gunakan cache
-                        Uint8List? ttdImage;
-                        if (item['ttd_base64'] != null && item['ttd_base64'] != "") {
-                          ttdImage = _getCachedTTD(item['id'].toString(), item['ttd_base64']);
-                        }
-
-                        Uint8List? fotoBarangImage;
-                        if (item['foto_barang'] != null && item['foto_barang'] != "") {
-                          fotoBarangImage = _getCachedFotoBarang(item['id'].toString(), item['foto_barang']);
-                        }
-
-                        Color kategoriColor;
-                        switch (item['kategori']) {
-                          case 'OK':
-                            kategoriColor = Colors.green;
-                            break;
-                          case 'Service':
-                            kategoriColor = Colors.orange;
-                            break;
-                          case 'Waste':
-                            kategoriColor = Colors.red;
-                            break;
-                          default:
-                            kategoriColor = Colors.grey;
-                        }
-
-                        return Card(
-                          margin: const EdgeInsets.only(bottom: 12),
-                          elevation: 2,
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(12),
-                          ),
-                          child: InkWell(
-                            borderRadius: BorderRadius.circular(12),
-                            onTap: () {
-                              _showDetailDialog(item, ttdImage, fotoBarangImage, isMobile);
-                            },
-                            child: Padding(
-                              padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
-                              child: Row(
-                                children: [
-                                  // Hanya icon, bukan gambar
-                                  Container(
-                                    width: isMobile ? 50 : 60,
-                                    height: isMobile ? 50 : 60,
-                                    decoration: BoxDecoration(
-                                      color: Colors.grey.shade100,
-                                      borderRadius: BorderRadius.circular(8),
-                                    ),
-                                    child: _buildItemImage(),
-                                  ),
-                                  SizedBox(width: isMobile ? 8 : 12),
-                                  
-                                  // Main Content
-                                  Expanded(
-                                    child: Column(
-                                      crossAxisAlignment: CrossAxisAlignment.start,
-                                      children: [
-                                        Row(
-                                          children: [
-                                            Expanded(
-                                              child: Text(
-                                                item['nama_toko'] ?? '-',
-                                                style: TextStyle(
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: isMobile ? 14 : 16,
-                                                ),
-                                                maxLines: 1,
-                                                overflow: TextOverflow.ellipsis,
-                                              ),
-                                            ),
-                                            Container(
-                                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
-                                              decoration: BoxDecoration(
-                                                color: kategoriColor.withOpacity(0.2),
-                                                borderRadius: BorderRadius.circular(4),
-                                                border: Border.all(color: kategoriColor.withOpacity(0.5)),
-                                              ),
-                                              child: Text(
-                                                item['kategori'] ?? '-',
-                                                style: TextStyle(
-                                                  color: kategoriColor,
-                                                  fontWeight: FontWeight.bold,
-                                                  fontSize: isMobile ? 10 : 12,
-                                                ),
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Text(
-                                          item['nama_barang'] ?? '-',
-                                          style: TextStyle(
-                                            fontSize: isMobile ? 12 : 14,
-                                          ),
-                                          maxLines: 1,
-                                          overflow: TextOverflow.ellipsis,
-                                        ),
-                                        const SizedBox(height: 2),
-                                        Row(
-                                          children: [
-                                            Icon(Icons.person_outline, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              "IT: ${item['nama_it'] ?? '-'}",
-                                              style: TextStyle(
-                                                fontSize: isMobile ? 10 : 12, 
-                                                color: Colors.grey.shade600
-                                              ),
-                                            ),
-                                            SizedBox(width: isMobile ? 6 : 12),
-                                            Icon(Icons.calendar_today, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
-                                            const SizedBox(width: 4),
-                                            Text(
-                                              item['tanggal'] ?? '-',
-                                              style: TextStyle(
-                                                fontSize: isMobile ? 10 : 12, 
-                                                color: Colors.grey.shade600
-                                              ),
-                                            ),
-                                          ],
-                                        ),
-                                      ],
-                                    ),
-                                  ),
-                                  
-                                  // Action Buttons
-                                  Column(
-                                    children: [
-                                      // Edit Button
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          color: Colors.orange.shade50,
-                                          borderRadius: BorderRadius.circular(6),
-                                        ),
-                                        child: IconButton(
-                                          icon: Icon(Icons.edit, size: isMobile ? 18 : 20),
-                                          color: Colors.orange,
-                                          tooltip: "Edit",
-                                          onPressed: () => _editData(item),
-                                          padding: EdgeInsets.all(isMobile ? 4 : 8),
-                                        ),
-                                      ),
-                                      SizedBox(height: isMobile ? 2 : 4),
-                                      // Print Button
-                                      Container(
-                                        decoration: BoxDecoration(
-                                          color: Colors.blue.shade50,
-                                          borderRadius: BorderRadius.circular(6),
-                                        ),
-                                        child: IconButton(
-                                          icon: Icon(Icons.print, size: isMobile ? 18 : 20),
-                                          color: Colors.blueAccent,
-                                          tooltip: "Print",
-                                          onPressed: () => _printSingleItem(item),
-                                          padding: EdgeInsets.all(isMobile ? 4 : 8),
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ],
-                              ),
-                            ),
-                          ),
-                        );
-                      },
-                    ),
-                ],
+                  ],
+                ),
               ),
             ),
     );
   }
 
-  Widget _buildSummaryItem(String title, int count, Color color) {
-    final bool isMobile = MediaQuery.of(context).size.width < 600;
-    
+PreferredSizeWidget _buildAppBar(bool isMobile) {
+    return AppBar(
+      elevation: 0,
+      backgroundColor: Colors.white,
+      foregroundColor: Colors.black,
+      title: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(8),
+            decoration: BoxDecoration(
+              color: const Color(0xFF667eea).withOpacity(0.1),
+              borderRadius: BorderRadius.circular(10),
+            ),
+            child: const Icon(
+              Icons.list_alt_rounded,
+              color: Color(0xFF667eea),
+              size: 24,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: isMobile
+                ? const Column(
+                    crossAxisAlignment: CrossAxisAlignment.start,
+                    mainAxisSize: MainAxisSize.min,
+                    children: [
+                      Text(
+                        "Daftar Retur",
+                        style: TextStyle(
+                          color: Colors.black,
+                          fontWeight: FontWeight.bold,
+                          fontSize: 18,
+                        ),
+                      ),
+                      Text(
+                        "Laporan data retur",
+                        style: TextStyle(
+                          color: Colors.grey,
+                          fontSize: 12,
+                          fontWeight: FontWeight.normal,
+                        ),
+                      ),
+                    ],
+                  )
+                : const Text(
+                    "Daftar Retur Barang",
+                    style: TextStyle(
+                      color: Colors.black,
+                      fontWeight: FontWeight.bold,
+                      fontSize: 18,
+                    ),
+                  ),
+          ),
+        ],
+      ),
+      actions: [
+        IconButton(
+          icon: const Icon(Icons.refresh, color: Colors.green, size: 22),
+          tooltip: "Refresh Data",
+          onPressed: () {
+            _currentPage = 1;
+            _hasMoreData = true;
+            _loadData();
+          },
+        ),
+        IconButton(
+          icon: const Icon(Icons.print, color: Colors.orange, size: 22),
+          tooltip: "Print Semua",
+          onPressed: _filteredData.isEmpty ? null : _printAllData,
+        ),
+        IconButton(
+          icon: const Icon(Icons.picture_as_pdf, color: Colors.red, size: 22),
+          tooltip: "Laporan PDF",
+          onPressed: _filteredData.isEmpty ? null : _generatePdfReport,
+        ),
+      ],
+    );
+  }
+
+  Widget _buildHeaderInfo(bool isMobile) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      decoration: BoxDecoration(
+        gradient: const LinearGradient(
+          colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+          begin: Alignment.topLeft,
+          end: Alignment.bottomRight,
+        ),
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: const Color(0xFF667eea).withOpacity(0.3),
+            blurRadius: 12,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Row(
+        children: [
+          Container(
+            padding: const EdgeInsets.all(12),
+            decoration: BoxDecoration(
+              color: Colors.white.withOpacity(0.2),
+              borderRadius: BorderRadius.circular(12),
+            ),
+            child: const Icon(
+              Icons.info_outline,
+              color: Colors.white,
+              size: 28,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Expanded(
+            child: Text(
+              "Data retur akan ditampilkan berdasarkan filter kategori dan tanggal yang dipilih",
+              style: TextStyle(
+                color: Colors.white,
+                fontSize: isMobile ? 12 : 14,
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildSummaryCard(bool isMobile) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Summary Retur",
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF667eea),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 2,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: isMobile 
+                ? Column(
+                    children: [
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildSummaryItem("OK", _okCount, Colors.green, isMobile),
+                          _buildSummaryItem("Service", _serviceCount, Colors.orange, isMobile),
+                        ],
+                      ),
+                      const SizedBox(height: 12),
+                      Row(
+                        mainAxisAlignment: MainAxisAlignment.spaceAround,
+                        children: [
+                          _buildSummaryItem("Waste", _wasteCount, Colors.red, isMobile),
+                          _buildSummaryItem("Total", _totalItems, Colors.blue, isMobile),
+                        ],
+                      ),
+                    ],
+                  )
+                : Row(
+                    mainAxisAlignment: MainAxisAlignment.spaceAround,
+                    children: [
+                      _buildSummaryItem("OK", _okCount, Colors.green, isMobile),
+                      _buildSummaryItem("Service", _serviceCount, Colors.orange, isMobile),
+                      _buildSummaryItem("Waste", _wasteCount, Colors.red, isMobile),
+                      _buildSummaryItem("Total", _totalItems, Colors.blue, isMobile),
+                    ],
+                  ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildSummaryItem(String title, int count, Color color, bool isMobile) {
     return Column(
       children: [
         Text(
@@ -1354,6 +1021,502 @@ class _ListReturPageState extends State<ListReturPage> {
     );
   }
 
+  Widget _buildFilterCard(bool isMobile) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        const Text(
+          "Filter Data",
+          style: TextStyle(
+            fontSize: 16,
+            fontWeight: FontWeight.bold,
+            color: Color(0xFF667eea),
+          ),
+        ),
+        const SizedBox(height: 12),
+        Card(
+          elevation: 2,
+          shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+          child: Padding(
+            padding: const EdgeInsets.all(16.0),
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              children: [
+                Row(
+                  children: [
+                    const Icon(Icons.filter_list, size: 20, color: Color(0xFF667eea)),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Kategori:",
+                      style: TextStyle(
+                        fontSize: isMobile ? 12 : 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12),
+                        decoration: BoxDecoration(
+                          color: Colors.grey.shade100,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.grey.shade300),
+                        ),
+                        child: DropdownButton<String>(
+                          value: _selectedKategori,
+                          underline: const SizedBox(),
+                          isExpanded: true,
+                          style: TextStyle(fontSize: isMobile ? 12 : 14, color: Colors.black87),
+                          items: const [
+                            DropdownMenuItem(value: 'All', child: Text('Semua Kategori')),
+                            DropdownMenuItem(value: 'OK', child: Text('OK')),
+                            DropdownMenuItem(value: 'Service', child: Text('Service')),
+                            DropdownMenuItem(value: 'Waste', child: Text('Waste')),
+                          ],
+                          onChanged: (v) {
+                            if (v != null) _filterKategori(v);
+                          },
+                        ),
+                      ),
+                    ),
+                  ],
+                ),
+                
+                const SizedBox(height: 16),
+                const Divider(height: 1),
+                const SizedBox(height: 16),
+                
+                Row(
+                  children: [
+                    const Icon(Icons.calendar_today, size: 20, color: Color(0xFF667eea)),
+                    const SizedBox(width: 8),
+                    Text(
+                      "Tanggal:",
+                      style: TextStyle(
+                        fontSize: isMobile ? 12 : 14,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.black87,
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Container(
+                        padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 10),
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          borderRadius: BorderRadius.circular(8),
+                          border: Border.all(color: Colors.blue.shade200),
+                        ),
+                        child: Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                DateFormat('dd MMM yyyy').format(_selectedDate!),
+                                style: TextStyle(
+                                  fontSize: isMobile ? 12 : 14,
+                                  fontWeight: FontWeight.w500,
+                                  color: Colors.blue.shade700,
+                                ),
+                              ),
+                            ),
+                            InkWell(
+                              onTap: _clearDateFilter,
+                              child: Icon(
+                                Icons.close,
+                                size: 18,
+                                color: Colors.blue.shade700,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ),
+                    const SizedBox(width: 8),
+                    ElevatedButton(
+                      onPressed: _selectDate,
+                      style: ElevatedButton.styleFrom(
+                        backgroundColor: const Color(0xFF667eea),
+                        foregroundColor: Colors.white,
+                        padding: EdgeInsets.symmetric(
+                          horizontal: isMobile ? 12 : 16, 
+                          vertical: isMobile ? 10 : 12,
+                        ),
+                        shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                      child: Icon(
+                        Icons.calendar_month, 
+                        size: isMobile ? 18 : 20
+                      ),
+                    ),
+                  ],
+                ),
+                const SizedBox(height: 8),
+                Text(
+                  "Default: Data hari ini. Klik X untuk reset ke hari ini",
+                  style: TextStyle(
+                    fontSize: isMobile ? 10 : 11,
+                    color: Colors.grey.shade600,
+                    fontStyle: FontStyle.italic,
+                  ),
+                ),
+              ],
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDataCountHeader(bool isMobile) {
+    return Row(
+      mainAxisAlignment: MainAxisAlignment.spaceBetween,
+      children: [
+        Text(
+          "Daftar Data",
+          style: TextStyle(
+            fontSize: isMobile ? 14 : 16,
+            fontWeight: FontWeight.bold,
+            color: const Color(0xFF667eea),
+          ),
+        ),
+        Container(
+          padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
+          decoration: BoxDecoration(
+            color: Colors.blue.shade50,
+            borderRadius: BorderRadius.circular(20),
+            border: Border.all(color: Colors.blue.shade200),
+          ),
+          child: Text(
+            "${_filteredData.length} / $_totalItems data",
+            style: TextStyle(
+              color: Colors.blue.shade700,
+              fontSize: isMobile ? 10 : 12,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDataList(bool isMobile) {
+    if (_filteredData.isEmpty) {
+      return Container(
+        height: 300,
+        alignment: Alignment.center,
+        child: Column(
+          mainAxisAlignment: MainAxisAlignment.center,
+          children: [
+            Icon(Icons.inbox, size: 64, color: Colors.grey.shade400),
+            const SizedBox(height: 16),
+            Text(
+              _selectedDate != null
+                  ? "Tidak ada data pada tanggal\n${DateFormat('dd MMM yyyy').format(_selectedDate!)}"
+                  : "Belum ada data retur",
+              style: TextStyle(
+                color: Colors.grey.shade600, 
+                fontSize: isMobile ? 14 : 16,
+              ),
+              textAlign: TextAlign.center,
+            ),
+            if (_selectedDate != null) ...[
+              const SizedBox(height: 16),
+              ElevatedButton.icon(
+                onPressed: _clearDateFilter,
+                icon: const Icon(Icons.clear, size: 18),
+                label: Text("Reset Filter", style: TextStyle(fontSize: isMobile ? 12 : 14)),
+                style: ElevatedButton.styleFrom(
+                  backgroundColor: const Color(0xFF667eea),
+                  foregroundColor: Colors.white,
+                  padding: EdgeInsets.symmetric(
+                    horizontal: isMobile ? 20 : 24, 
+                    vertical: isMobile ? 10 : 12,
+                  ),
+                  shape: RoundedRectangleBorder(
+                    borderRadius: BorderRadius.circular(8),
+                  ),
+                ),
+              ),
+            ],
+          ],
+        ),
+      );
+    }
+
+    return ListView.builder(
+      shrinkWrap: true,
+      physics: const NeverScrollableScrollPhysics(),
+      itemCount: _filteredData.length,
+      itemBuilder: (context, index) {
+        final item = _filteredData[index];
+
+        Color kategoriColor;
+        switch (item['kategori']) {
+          case 'OK':
+            kategoriColor = Colors.green;
+            break;
+          case 'Service':
+            kategoriColor = Colors.orange;
+            break;
+          case 'Waste':
+            kategoriColor = Colors.red;
+            break;
+          default:
+            kategoriColor = Colors.grey;
+        }
+
+        return Card(
+          margin: const EdgeInsets.only(bottom: 12),
+          elevation: 2,
+          shape: RoundedRectangleBorder(
+            borderRadius: BorderRadius.circular(12),
+          ),
+          child: InkWell(
+            borderRadius: BorderRadius.circular(12),
+            onTap: () async {
+              // ✅ Load detail on demand
+              showDialog(
+                context: context,
+                barrierDismissible: false,
+                builder: (context) => const Center(
+                  child: CircularProgressIndicator(),
+                ),
+              );
+
+             Map<String, dynamic>? detailData = await _loadDetailData(int.parse(item['id'].toString()));
+              
+              if (mounted) Navigator.pop(context);
+              
+              if (detailData != null) {
+                Uint8List? ttdImage;
+                if (detailData['ttd_base64'] != null && detailData['ttd_base64'] != "") {
+                  ttdImage = base64Decode(detailData['ttd_base64']);
+                }
+
+                Uint8List? fotoBarangImage;
+                if (detailData['foto_barang'] != null && detailData['foto_barang'] != "") {
+                  fotoBarangImage = base64Decode(detailData['foto_barang']);
+                }
+
+                _showDetailDialog(detailData, ttdImage, fotoBarangImage, isMobile);
+              }
+            },
+            child: Padding(
+              padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
+              child: Row(
+                children: [
+                  Container(
+                    width: isMobile ? 50 : 60,
+                    height: isMobile ? 50 : 60,
+                    child: _buildItemImage(item),
+                  ),
+                  SizedBox(width: isMobile ? 8 : 12),
+                  
+                  Expanded(
+                    child: Column(
+                      crossAxisAlignment: CrossAxisAlignment.start,
+                      children: [
+                        Row(
+                          children: [
+                            Expanded(
+                              child: Text(
+                                item['nama_toko'] ?? '-',
+                                style: TextStyle(
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: isMobile ? 14 : 16,
+                                ),
+                                maxLines: 1,
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            ),
+                            Container(
+                              padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 3),
+                              decoration: BoxDecoration(
+                                color: kategoriColor.withOpacity(0.2),
+                                borderRadius: BorderRadius.circular(4),
+                                border: Border.all(color: kategoriColor.withOpacity(0.5)),
+                              ),
+                              child: Text(
+                                item['kategori'] ?? '-',
+                                style: TextStyle(
+                                  color: kategoriColor,
+                                  fontWeight: FontWeight.bold,
+                                  fontSize: isMobile ? 10 : 12,
+                                ),
+                              ),
+                            ),
+                          ],
+                        ),
+                        const SizedBox(height: 2),
+                        Text(
+                          item['nama_barang'] ?? '-',
+                          style: TextStyle(
+                            fontSize: isMobile ? 12 : 14,
+                          ),
+                          maxLines: 1,
+                          overflow: TextOverflow.ellipsis,
+                        ),
+                        const SizedBox(height: 2),
+                        Row(
+                          children: [
+                            Icon(Icons.person_outline, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
+                            const SizedBox(width: 4),
+                            Text(
+                              "IT: ${item['nama_it'] ?? '-'}",
+                              style: TextStyle(
+                                fontSize: isMobile ? 10 : 12, 
+                                color: Colors.grey.shade600
+                              ),
+                            ),
+                            SizedBox(width: isMobile ? 6 : 12),
+                            Icon(Icons.calendar_today, size: isMobile ? 12 : 14, color: Colors.grey.shade600),
+                            const SizedBox(width: 4),
+                            Text(
+                              item['tanggal'] ?? '-',
+                              style: TextStyle(
+                                fontSize: isMobile ? 10 : 12, 
+                                color: Colors.grey.shade600
+                              ),
+                            ),
+                          ],
+                        ),
+                      ],
+                    ),
+                  ),
+                  
+                  Column(
+                    children: [
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.orange.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: IconButton(
+                          icon: Icon(Icons.edit, size: isMobile ? 18 : 20),
+                          color: Colors.orange,
+                          tooltip: "Edit",
+                          onPressed: () => _editData(item),
+                          padding: EdgeInsets.all(isMobile ? 4 : 8),
+                        ),
+                      ),
+                      SizedBox(height: isMobile ? 2 : 4),
+                      Container(
+                        decoration: BoxDecoration(
+                          color: Colors.blue.shade50,
+                          borderRadius: BorderRadius.circular(6),
+                        ),
+                        child: IconButton(
+                          icon: Icon(Icons.print, size: isMobile ? 18 : 20),
+                          color: Colors.blueAccent,
+                          tooltip: "Print",
+                          onPressed: () => _printSingleItem(item),
+                          padding: EdgeInsets.all(isMobile ? 4 : 8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ],
+              ),
+            ),
+          ),
+        );
+      },
+    );
+  }
+
+  Widget _buildShimmerLoading(bool isMobile) {
+    return SingleChildScrollView(
+      padding: const EdgeInsets.all(16.0),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Container(
+            height: 80,
+            decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(16),
+              color: Colors.grey[200],
+            ),
+          ),
+          const SizedBox(height: 20),
+          Container(
+            height: 20,
+            width: 150,
+            color: Colors.grey[200],
+          ),
+          const SizedBox(height: 12),
+          Card(
+            elevation: 2,
+            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+            child: Padding(
+              padding: const EdgeInsets.all(16.0),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.spaceAround,
+                children: List.generate(4, (index) => 
+                  Column(
+                    children: [
+                      Container(
+                        height: 15,
+                        width: 40,
+                        color: Colors.grey[200],
+                      ),
+                      const SizedBox(height: 6),
+                      Container(
+                        height: 40,
+                        width: 60,
+                        decoration: BoxDecoration(
+                          color: Colors.grey[200],
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                      ),
+                    ],
+                  ),
+                ),
+              ),
+            ),
+          ),
+          const SizedBox(height: 20),
+          ...List.generate(5, (index) => 
+            Card(
+              margin: const EdgeInsets.only(bottom: 12),
+              child: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Row(
+                  children: [
+                    Container(
+                      width: 60,
+                      height: 60,
+                      decoration: BoxDecoration(
+                        color: Colors.grey[200],
+                        borderRadius: BorderRadius.circular(8),
+                      ),
+                    ),
+                    const SizedBox(width: 12),
+                    Expanded(
+                      child: Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Container(height: 15, width: double.infinity, color: Colors.grey[200]),
+                          const SizedBox(height: 6),
+                          Container(height: 12, width: 150, color: Colors.grey[200]),
+                          const SizedBox(height: 6),
+                          Container(height: 10, width: 200, color: Colors.grey[200]),
+                        ],
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  // ✅ DETAIL DIALOG dengan lazy loading
   void _showDetailDialog(Map<String, dynamic> item, Uint8List? ttdImage, Uint8List? fotoBarangImage, bool isMobile) {
     Color kategoriColor;
     switch (item['kategori']) {
@@ -1443,7 +1606,6 @@ class _ListReturPageState extends State<ListReturPage> {
                   const SizedBox(height: 8),
                   _buildDetailRow("Keterangan", item['keterangan'] ?? '-', isMobile),
                   
-                  // ✅ FOTO BARANG SECTION
                   if (fotoBarangImage != null) ...[
                     const SizedBox(height: 16),
                     Text("Foto Barang:", style: TextStyle(
@@ -1486,7 +1648,6 @@ class _ListReturPageState extends State<ListReturPage> {
                     ),
                   ],
                   
-                  // ✅ TANDA TANGAN SECTION
                   const SizedBox(height: 16),
                   Text("Tanda Tangan:", style: TextStyle(
                     fontWeight: FontWeight.bold,
@@ -1549,11 +1710,12 @@ class _ListReturPageState extends State<ListReturPage> {
                       ),
                     ),
                   
-                  const SizedBox(height: 20),
+                 const SizedBox(height: 20),
+                  
+                  // ✅ Action Buttons
                   if (isMobile) 
                     Column(
                       children: [
-                        // Edit Button
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton.icon(
@@ -1574,7 +1736,6 @@ class _ListReturPageState extends State<ListReturPage> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        // Print Button
                         SizedBox(
                           width: double.infinity,
                           child: ElevatedButton.icon(
@@ -1595,7 +1756,6 @@ class _ListReturPageState extends State<ListReturPage> {
                           ),
                         ),
                         const SizedBox(height: 8),
-                        // Delete Button
                         SizedBox(
                           width: double.infinity,
                           child: OutlinedButton.icon(
@@ -1618,40 +1778,62 @@ class _ListReturPageState extends State<ListReturPage> {
                       ],
                     )
                   else
-                    Row(
+                    Column(
                       children: [
-                        // Edit Button
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: () {
-                              Navigator.pop(context);
-                              _editData(item);
-                            },
-                            icon: const Icon(Icons.edit),
-                            label: const Text("Edit"),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.orange,
-                              foregroundColor: Colors.white,
-                              padding: const EdgeInsets.symmetric(vertical: 12),
-                              shape: RoundedRectangleBorder(
-                                borderRadius: BorderRadius.circular(8),
+                        Row(
+                          children: [
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _editData(item);
+                                },
+                                icon: const Icon(Icons.edit),
+                                label: const Text("Edit"),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.orange,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
                               ),
                             ),
-                          ),
+                            const SizedBox(width: 8),
+                            Expanded(
+                              child: ElevatedButton.icon(
+                                onPressed: () {
+                                  Navigator.pop(context);
+                                  _printSingleItem(item);
+                                },
+                                icon: const Icon(Icons.print),
+                                label: const Text("Print"),
+                                style: ElevatedButton.styleFrom(
+                                  backgroundColor: Colors.blueAccent,
+                                  foregroundColor: Colors.white,
+                                  padding: const EdgeInsets.symmetric(vertical: 12),
+                                  shape: RoundedRectangleBorder(
+                                    borderRadius: BorderRadius.circular(8),
+                                  ),
+                                ),
+                              ),
+                            ),
+                          ],
                         ),
-                        const SizedBox(width: 8),
-                        // Print Button
-                        Expanded(
-                          child: ElevatedButton.icon(
+                        const SizedBox(height: 8),
+                        SizedBox(
+                          width: double.infinity,
+                          child: OutlinedButton.icon(
                             onPressed: () {
                               Navigator.pop(context);
-                              _printSingleItem(item);
+                              _deleteData(item);
                             },
-                            icon: const Icon(Icons.print),
-                            label: const Text("Print"),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.blueAccent,
-                              foregroundColor: Colors.white,
+                            icon: const Icon(Icons.delete),
+                            label: const Text("Hapus Data"),
+                            style: OutlinedButton.styleFrom(
+                              foregroundColor: Colors.red,
+                              side: const BorderSide(color: Colors.red),
                               padding: const EdgeInsets.symmetric(vertical: 12),
                               shape: RoundedRectangleBorder(
                                 borderRadius: BorderRadius.circular(8),
@@ -1661,29 +1843,6 @@ class _ListReturPageState extends State<ListReturPage> {
                         ),
                       ],
                     ),
-                  if (!isMobile) ...[
-                    const SizedBox(height: 8),
-                    // Delete Button
-                    SizedBox(
-                      width: double.infinity,
-                      child: OutlinedButton.icon(
-                        onPressed: () {
-                          Navigator.pop(context);
-                          _deleteData(item);
-                        },
-                        icon: const Icon(Icons.delete),
-                        label: const Text("Hapus Data"),
-                        style: OutlinedButton.styleFrom(
-                          foregroundColor: Colors.red,
-                          side: const BorderSide(color: Colors.red),
-                          padding: const EdgeInsets.symmetric(vertical: 12),
-                          shape: RoundedRectangleBorder(
-                            borderRadius: BorderRadius.circular(8),
-                          ),
-                        ),
-                      ),
-                    ),
-                  ],
                 ],
               ),
             ),
@@ -1694,222 +1853,41 @@ class _ListReturPageState extends State<ListReturPage> {
   }
 
   Widget _buildDetailRow(String label, String value, bool isMobile) {
-  return Padding(
-    padding: const EdgeInsets.symmetric(vertical: 4),
-    child: Row(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        SizedBox(
-          width: isMobile ? 100 : 120,
-          child: Text(
-            "$label:",
-            style: TextStyle(
-              fontWeight: FontWeight.bold,
-              fontSize: isMobile ? 12 : 14,
-            ),
-          ),
-        ),
-        Expanded(
-          child: Text(
-            value,
-            style: TextStyle(fontSize: isMobile ? 12 : 14),
-          ),
-        ),
-      ],
-    ),
-  );
-}
-
-  // ================= SHIMMER LOADING EFFECT =================
-  Widget _buildShimmerLoading(bool isMobile) {
-    return SingleChildScrollView(
-      padding: const EdgeInsets.all(16.0),
-      child: Column(
+    return Padding(
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
         crossAxisAlignment: CrossAxisAlignment.start,
         children: [
-          // Header Shimmer
-          Container(
-            height: 80,
-            decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(16),
-              color: Colors.grey[200],
-            ),
-          ),
-          
-          const SizedBox(height: 20),
-          
-          // Summary Shimmer
-          Container(
-            height: 20,
-            width: 150,
-            color: Colors.grey[200],
-          ),
-          const SizedBox(height: 12),
-          
-          Card(
-            elevation: 2,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Row(
-                mainAxisAlignment: MainAxisAlignment.spaceAround,
-                children: List.generate(4, (index) => 
-                  Column(
-                    children: [
-                      Container(
-                        height: 15,
-                        width: 40,
-                        color: Colors.grey[200],
-                      ),
-                      const SizedBox(height: 6),
-                      Container(
-                        height: 40,
-                        width: 60,
-                        decoration: BoxDecoration(
-                          color: Colors.grey[200],
-                          borderRadius: BorderRadius.circular(8),
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
+          SizedBox(
+            width: isMobile ? 100 : 120,
+            child: Text(
+              "$label:",
+              style: TextStyle(
+                fontWeight: FontWeight.bold,
+                fontSize: isMobile ? 12 : 14,
               ),
             ),
           ),
-          
-          const SizedBox(height: 20),
-          
-          // Filter Shimmer
-          Container(
-            height: 20,
-            width: 100,
-            color: Colors.grey[200],
-          ),
-          const SizedBox(height: 12),
-          
-          Card(
-            elevation: 2,
-            shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
-            child: Padding(
-              padding: const EdgeInsets.all(16.0),
-              child: Column(
-                children: [
-                  Row(
-                    children: [
-                      CircleAvatar(backgroundColor: Colors.grey[200], radius: 10),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(height: 15, width: 80, color: Colors.grey[200]),
-                            const SizedBox(height: 4),
-                            Container(height: 40, width: double.infinity, color: Colors.grey[200]),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                  const SizedBox(height: 16),
-                  const Divider(),
-                  const SizedBox(height: 16),
-                  Row(
-                    children: [
-                      CircleAvatar(backgroundColor: Colors.grey[200], radius: 10),
-                      const SizedBox(width: 8),
-                      Expanded(
-                        child: Column(
-                          crossAxisAlignment: CrossAxisAlignment.start,
-                          children: [
-                            Container(height: 15, width: 60, color: Colors.grey[200]),
-                            const SizedBox(height: 4),
-                            Container(height: 40, width: double.infinity, color: Colors.grey[200]),
-                          ],
-                        ),
-                      ),
-                    ],
-                  ),
-                ],
-              ),
+          Expanded(
+            child: Text(
+              value,
+              style: TextStyle(fontSize: isMobile ? 12 : 14),
             ),
           ),
-          
-          const SizedBox(height: 20),
-          
-          // List Shimmer
-          _buildListShimmer(isMobile),
         ],
       ),
     );
   }
 
-  Widget _buildListShimmer(bool isMobile) {
-    return Column(
-      children: List.generate(5, (index) => 
-        Card(
-          margin: const EdgeInsets.only(bottom: 12),
-          elevation: 2,
-          shape: RoundedRectangleBorder(
-            borderRadius: BorderRadius.circular(12),
-          ),
-          child: Padding(
-            padding: EdgeInsets.all(isMobile ? 8.0 : 12.0),
-            child: Row(
-              children: [
-                Container(
-                  width: isMobile ? 50 : 60,
-                  height: isMobile ? 50 : 60,
-                  decoration: BoxDecoration(
-                    color: Colors.grey[200],
-                    borderRadius: BorderRadius.circular(8),
-                  ),
-                ),
-                SizedBox(width: isMobile ? 8 : 12),
-                
-                Expanded(
-                  child: Column(
-                    crossAxisAlignment: CrossAxisAlignment.start,
-                    children: [
-                      Container(height: 15, width: double.infinity, color: Colors.grey[200]),
-                      const SizedBox(height: 6),
-                      Container(height: 12, width: 150, color: Colors.grey[200]),
-                      const SizedBox(height: 6),
-                      Container(height: 10, width: 200, color: Colors.grey[200]),
-                    ],
-                  ),
-                ),
-                
-                Column(
-                  children: [
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.grey[200],
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                    ),
-                    const SizedBox(height: 4),
-                    Container(
-                      width: 40,
-                      height: 40,
-                      decoration: BoxDecoration(
-                        color: Colors.grey[200],
-                        borderRadius: BorderRadius.circular(6),
-                      ),
-                    ),
-                  ],
-                ),
-              ],
-            ),
-          ),
-        ),
-      ),
-    );
-  }
+  
+  
+  
+ 
+
+  
 }
 
-// ================= EDIT PAGE tanpa TTD =================
+// ================= EDIT PAGE (ELEGAN VERSION) =================
 class EditReturPage extends StatefulWidget {
   final Map<String, dynamic> data;
   
@@ -1942,6 +1920,11 @@ class _EditReturPageState extends State<EditReturPage> {
   @override
   void initState() {
     super.initState();
+    _initializeControllers();
+    _loadExistingFoto();
+  }
+
+  void _initializeControllers() {
     _tanggalController = TextEditingController(text: widget.data['tanggal'] ?? '');
     _namaTokoController = TextEditingController(text: widget.data['nama_toko'] ?? '');
     _namaITController = TextEditingController(text: widget.data['nama_it'] ?? '');
@@ -1950,13 +1933,14 @@ class _EditReturPageState extends State<EditReturPage> {
     _nomorDokumenController = TextEditingController(text: widget.data['nomor_dokumen'] ?? '');
     _keteranganController = TextEditingController(text: widget.data['keterangan'] ?? '');
     _selectedKategori = widget.data['kategori'] ?? 'OK';
-    
-    // ✅ Load existing foto barang
+  }
+
+  void _loadExistingFoto() {
     if (widget.data['foto_barang'] != null && widget.data['foto_barang'] != "") {
       try {
         _existingFotoBarang = base64Decode(widget.data['foto_barang']);
       } catch (e) {
-        print('Error decoding foto: $e');
+        print('❌ Error decoding foto: $e');
       }
     }
   }
@@ -1973,7 +1957,7 @@ class _EditReturPageState extends State<EditReturPage> {
     super.dispose();
   }
 
-  // ✅ FOTO FUNCTIONS
+  // ================= FOTO BARANG FUNCTIONS =================
   Future<void> _ambilFotoDariKamera() async {
     try {
       final XFile? photo = await _picker.pickImage(
@@ -1988,7 +1972,7 @@ class _EditReturPageState extends State<EditReturPage> {
           _newFotoBarang = File(photo.path);
           _fotoChanged = true;
         });
-        _showSuccessSnackBar("Foto berhasil diambil");
+        _showSuccessSnackBar("📸 Foto berhasil diambil");
       }
     } catch (e) {
       _showErrorSnackBar("Gagal mengambil foto: $e");
@@ -2009,7 +1993,7 @@ class _EditReturPageState extends State<EditReturPage> {
           _newFotoBarang = File(photo.path);
           _fotoChanged = true;
         });
-        _showSuccessSnackBar("Foto berhasil dipilih");
+        _showSuccessSnackBar("🖼️ Foto berhasil dipilih");
       }
     } catch (e) {
       _showErrorSnackBar("Gagal memilih foto: $e");
@@ -2020,64 +2004,151 @@ class _EditReturPageState extends State<EditReturPage> {
     showModalBottomSheet(
       context: context,
       shape: const RoundedRectangleBorder(
-        borderRadius: BorderRadius.vertical(top: Radius.circular(20)),
+        borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
       ),
+      clipBehavior: Clip.antiAliasWithSaveLayer,
       builder: (context) => Container(
-        padding: const EdgeInsets.all(20),
-        child: Column(
-          mainAxisSize: MainAxisSize.min,
+        decoration: const BoxDecoration(
+          color: Colors.white,
+          borderRadius: BorderRadius.vertical(top: Radius.circular(24)),
+        ),
+        child: SafeArea(
+          child: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              // Handle bar
+              Container(
+                margin: const EdgeInsets.only(top: 12, bottom: 8),
+                width: 60,
+                height: 5,
+                decoration: BoxDecoration(
+                  color: Colors.grey[300],
+                  borderRadius: BorderRadius.circular(3),
+                ),
+              ),
+              
+              // Header
+              Padding(
+                padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+                child: Text(
+                  "Pilih Sumber Foto",
+                  style: TextStyle(
+                    fontSize: 20,
+                    fontWeight: FontWeight.w700,
+                    color: Colors.grey[800],
+                  ),
+                ),
+              ),
+              
+              const Divider(height: 1),
+              
+              // Camera Option
+              _buildPhotoOption(
+                icon: Icons.camera_alt_rounded,
+                title: "Kamera",
+                subtitle: "Ambil foto baru",
+                color: Colors.blue,
+                onTap: () {
+                  Navigator.pop(context);
+                  _ambilFotoDariKamera();
+                },
+              ),
+              
+              // Gallery Option
+              _buildPhotoOption(
+                icon: Icons.photo_library_rounded,
+                title: "Galeri",
+                subtitle: "Pilih dari galeri",
+                color: Colors.purple,
+                onTap: () {
+                  Navigator.pop(context);
+                  _ambilFotoDariGaleri();
+                },
+              ),
+              
+              // Cancel Button
+              Padding(
+                padding: const EdgeInsets.fromLTRB(16, 8, 16, 24),
+                child: SizedBox(
+                  width: double.infinity,
+                  child: OutlinedButton(
+                    onPressed: () => Navigator.pop(context),
+                    style: OutlinedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 16),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      side: BorderSide(color: Colors.grey[300]!),
+                    ),
+                    child: Text(
+                      "Batal",
+                      style: TextStyle(
+                        fontSize: 16,
+                        fontWeight: FontWeight.w600,
+                        color: Colors.grey[700],
+                      ),
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPhotoOption({
+    required IconData icon,
+    required String title,
+    required String subtitle,
+    required Color color,
+    required VoidCallback onTap,
+  }) {
+    return InkWell(
+      onTap: onTap,
+      splashColor: color.withOpacity(0.1),
+      child: Padding(
+        padding: const EdgeInsets.symmetric(horizontal: 24, vertical: 16),
+        child: Row(
           children: [
             Container(
-              width: 40,
-              height: 4,
+              padding: const EdgeInsets.all(12),
               decoration: BoxDecoration(
-                color: Colors.grey[300],
-                borderRadius: BorderRadius.circular(2),
+                color: color.withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Icon(icon, color: color, size: 28),
+            ),
+            const SizedBox(width: 16),
+            Expanded(
+              child: Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  Text(
+                    title,
+                    style: TextStyle(
+                      fontSize: 16,
+                      fontWeight: FontWeight.w600,
+                      color: Colors.grey[800],
+                    ),
+                  ),
+                  const SizedBox(height: 2),
+                  Text(
+                    subtitle,
+                    style: TextStyle(
+                      fontSize: 14,
+                      color: Colors.grey[600],
+                    ),
+                  ),
+                ],
               ),
             ),
-            const SizedBox(height: 20),
-            const Text(
-              "Pilih Sumber Foto",
-              style: TextStyle(
-                fontSize: 18,
-                fontWeight: FontWeight.bold,
-              ),
+            Icon(
+              Icons.chevron_right_rounded,
+              color: Colors.grey[400],
+              size: 24,
             ),
-            const SizedBox(height: 20),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.blue[50],
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.camera_alt, color: Colors.blue),
-              ),
-              title: const Text("Kamera"),
-              subtitle: const Text("Ambil foto baru"),
-              onTap: () {
-                Navigator.pop(context);
-                _ambilFotoDariKamera();
-              },
-            ),
-            const SizedBox(height: 10),
-            ListTile(
-              leading: Container(
-                padding: const EdgeInsets.all(10),
-                decoration: BoxDecoration(
-                  color: Colors.purple[50],
-                  borderRadius: BorderRadius.circular(10),
-                ),
-                child: const Icon(Icons.photo_library, color: Colors.purple),
-              ),
-              title: const Text("Galeri"),
-              subtitle: const Text("Pilih dari galeri"),
-              onTap: () {
-                Navigator.pop(context);
-                _ambilFotoDariGaleri();
-              },
-            ),
-            const SizedBox(height: 20),
           ],
         ),
       ),
@@ -2085,12 +2156,45 @@ class _EditReturPageState extends State<EditReturPage> {
   }
 
   void _hapusFoto() {
-    setState(() {
-      _newFotoBarang = null;
-      _existingFotoBarang = null;
-      _fotoChanged = true;
-    });
-    _showSuccessSnackBar("Foto dihapus");
+    showDialog(
+      context: context,
+      builder: (context) => AlertDialog(
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+        title: const Row(
+          children: [
+            Icon(Icons.warning_amber_rounded, color: Colors.orange),
+            SizedBox(width: 12),
+            Text("Konfirmasi Hapus"),
+          ],
+        ),
+        content: const Text("Apakah Anda yakin ingin menghapus foto barang ini?"),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.pop(context),
+            child: const Text("Batal"),
+          ),
+          ElevatedButton(
+            onPressed: () {
+              Navigator.pop(context);
+              setState(() {
+                _newFotoBarang = null;
+                _existingFotoBarang = null;
+                _fotoChanged = true;
+              });
+              _showSuccessSnackBar("🗑️ Foto berhasil dihapus");
+            },
+            style: ElevatedButton.styleFrom(
+              backgroundColor: Colors.red,
+              foregroundColor: Colors.white,
+              shape: RoundedRectangleBorder(
+                borderRadius: BorderRadius.circular(10),
+              ),
+            ),
+            child: const Text("Hapus"),
+          ),
+        ],
+      ),
+    );
   }
 
   void _batalUbahFoto() {
@@ -2098,15 +2202,29 @@ class _EditReturPageState extends State<EditReturPage> {
       _newFotoBarang = null;
       _fotoChanged = false;
     });
-    _showSuccessSnackBar("Batal ubah foto");
+    _showSuccessSnackBar("🔄 Batal ubah foto");
   }
 
+  // ================= DATE PICKER =================
   Future<void> _selectDate() async {
     final DateTime? picked = await showDatePicker(
       context: context,
       initialDate: DateTime.now(),
       firstDate: DateTime(2020),
       lastDate: DateTime.now().add(const Duration(days: 365)),
+      builder: (context, child) {
+        return Theme(
+          data: Theme.of(context).copyWith(
+            colorScheme: const ColorScheme.light(
+              primary: Color(0xFF667eea),
+              onPrimary: Colors.white,
+              surface: Colors.white,
+              onSurface: Colors.black,
+            ),
+          ),
+          child: child!,
+        );
+      },
     );
 
     if (picked != null) {
@@ -2116,6 +2234,7 @@ class _EditReturPageState extends State<EditReturPage> {
     }
   }
 
+  // ================= UPDATE DATA =================
   Future<void> _updateData() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -2124,19 +2243,16 @@ class _EditReturPageState extends State<EditReturPage> {
     });
 
     try {
-      // ✅ Handle foto barang
+      // Handle foto barang
       String? fotoBase64;
       if (_fotoChanged) {
         if (_newFotoBarang != null) {
-          // Ada foto baru
           final bytes = await _newFotoBarang!.readAsBytes();
           fotoBase64 = base64Encode(bytes);
         } else {
-          // Foto dihapus - kirim empty string
           fotoBase64 = "";
         }
       } else {
-        // Foto tidak berubah - jangan kirim (null)
         fotoBase64 = null;
       }
 
@@ -2153,13 +2269,12 @@ class _EditReturPageState extends State<EditReturPage> {
         'keterangan': _keteranganController.text,
       };
 
-      // Hanya kirim foto_barang jika berubah
       if (fotoBase64 != null) {
         requestBody['foto_barang'] = fotoBase64;
       }
 
       final response = await http.post(
-        Uri.parse("http://192.168.0.110/returx/api/retur/update.php"),
+        Uri.parse("http://sci.rotio.id:9050/returx/api/retur/update.php"),
         headers: {'Content-Type': 'application/json'},
         body: jsonEncode(requestBody),
       );
@@ -2185,6 +2300,7 @@ class _EditReturPageState extends State<EditReturPage> {
     }
   }
 
+  // ================= SNACKBAR HELPERS =================
   void _showSuccessSnackBar(String message) {
     ScaffoldMessenger.of(context).showSnackBar(
       SnackBar(
@@ -2195,10 +2311,11 @@ class _EditReturPageState extends State<EditReturPage> {
             Expanded(child: Text(message)),
           ],
         ),
-        backgroundColor: Colors.green[400],
+        backgroundColor: Colors.green,
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
+        duration: const Duration(seconds: 2),
       ),
     );
   }
@@ -2213,17 +2330,20 @@ class _EditReturPageState extends State<EditReturPage> {
             Expanded(child: Text(message)),
           ],
         ),
-        backgroundColor: Colors.red[400],
+        backgroundColor: Colors.red,
         behavior: SnackBarBehavior.floating,
-        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+        shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
         margin: const EdgeInsets.all(16),
+        duration: const Duration(seconds: 3),
       ),
     );
   }
 
+  // ================= BUILD METHOD =================
   @override
   Widget build(BuildContext context) {
     final bool isMobile = MediaQuery.of(context).size.width < 600;
+    final theme = Theme.of(context);
     
     return Scaffold(
       backgroundColor: const Color(0xFFF5F7FA),
@@ -2231,313 +2351,657 @@ class _EditReturPageState extends State<EditReturPage> {
         elevation: 0,
         backgroundColor: Colors.white,
         foregroundColor: Colors.black,
-        title: Text(
-          "Edit Data Retur",
-          style: TextStyle(fontWeight: FontWeight.bold, fontSize: isMobile ? 16 : 18),
-        ),
-      ),
-      body: SingleChildScrollView(
-        padding: EdgeInsets.all(isMobile ? 12.0 : 16.0),
-        child: Form(
-          key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.start,
-            children: [
-              // Header Info
-              Container(
-                padding: const EdgeInsets.all(16),
-                decoration: BoxDecoration(
-                  gradient: const LinearGradient(
-                    colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+        centerTitle: false,
+        title: Row(
+          children: [
+            Container(
+              padding: const EdgeInsets.all(8),
+              decoration: BoxDecoration(
+                color: const Color(0xFF667eea).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(10),
+              ),
+              child: const Icon(
+                Icons.edit_note_rounded,
+                color: Color(0xFF667eea),
+                size: 24,
+              ),
+            ),
+            const SizedBox(width: 12),
+            Column(
+              crossAxisAlignment: CrossAxisAlignment.start,
+              mainAxisSize: MainAxisSize.min,
+              children: [
+                Text(
+                  "Edit Data Retur",
+                  style: TextStyle(
+                    fontSize: isMobile ? 16 : 18,
+                    fontWeight: FontWeight.bold,
+                    color: Colors.black,
                   ),
-                  borderRadius: BorderRadius.circular(16),
                 ),
-                child: Row(
+                Text(
+                  widget.data['nama_toko'] ?? 'Toko',
+                  style: TextStyle(
+                    fontSize: isMobile ? 12 : 13,
+                    color: Colors.grey[600],
+                    fontWeight: FontWeight.normal,
+                  ),
+                ),
+              ],
+            ),
+          ],
+        ),
+        actions: [
+          if (!_isLoading)
+            IconButton(
+              icon: const Icon(Icons.close, size: 24),
+              onPressed: () => Navigator.pop(context),
+              tooltip: "Tutup",
+            ),
+        ],
+      ),
+      body: _isLoading
+          ? _buildLoadingState()
+          : SingleChildScrollView(
+              padding: EdgeInsets.all(isMobile ? 16.0 : 20.0),
+              child: Form(
+                key: _formKey,
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
                   children: [
-                    const Icon(Icons.edit, color: Colors.white),
-                    const SizedBox(width: 12),
-                    Expanded(
-                      child: Text(
-                        "Edit informasi data retur barang",
-                        style: TextStyle(
-                          color: Colors.white, 
-                          fontSize: isMobile ? 12 : 14
-                        ),
-                      ),
-                    ),
-                  ],
-                ),
-              ),
-              
-              const SizedBox(height: 20),
-              
-              // Form Fields
-              _buildTextField("Tanggal", _tanggalController, 
-                icon: Icons.calendar_today,
-                readOnly: true,
-                onTap: _selectDate,
-                isMobile: isMobile,
-              ),
-              _buildTextField("Nama Toko", _namaTokoController, icon: Icons.store, isMobile: isMobile),
-              _buildTextField("Nama IT", _namaITController, icon: Icons.person, isMobile: isMobile),
-              _buildTextField("Nama Barang", _namaBarangController, icon: Icons.inventory, isMobile: isMobile),
-              _buildTextField("SN Barang", _snBarangController, icon: Icons.qr_code, required: false, isMobile: isMobile),
-              _buildTextField("Nomor Dokumen", _nomorDokumenController, icon: Icons.description, required: false, isMobile: isMobile),
-              
-              // Kategori Dropdown
-              Text(
-                "Kategori",
-                style: TextStyle(
-                  fontWeight: FontWeight.w600, 
-                  fontSize: isMobile ? 12 : 14
-                ),
-              ),
-              const SizedBox(height: 8),
-              Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16),
-                decoration: BoxDecoration(
-                  color: Colors.white,
-                  borderRadius: BorderRadius.circular(12),
-                  border: Border.all(color: Colors.grey[300]!),
-                ),
-                child: DropdownButton<String>(
-                  value: _selectedKategori,
-                  isExpanded: true,
-                  underline: const SizedBox(),
-                  items: const [
-                    DropdownMenuItem(value: 'OK', child: Text('OK')),
-                    DropdownMenuItem(value: 'Service', child: Text('Service')),
-                    DropdownMenuItem(value: 'Waste', child: Text('Waste')),
-                  ],
-                  onChanged: (v) {
-                    if (v != null) {
-                      setState(() {
-                        _selectedKategori = v;
-                      });
-                    }
-                  },
-                ),
-              ),
-              const SizedBox(height: 16),
-              
-              _buildTextField("Keterangan", _keteranganController, 
-                icon: Icons.notes,
-                maxLines: 3,
-                required: false,
-                isMobile: isMobile,
-              ),
-              
-              // ✅ FOTO BARANG SECTION
-              const SizedBox(height: 20),
-              Text(
-                "Foto Barang",
-                style: TextStyle(
-                  fontWeight: FontWeight.w600, 
-                  fontSize: isMobile ? 12 : 14
-                ),
-              ),
-              const SizedBox(height: 8),
-              
-              if (_existingFotoBarang != null && !_fotoChanged)
-                Column(
-                  children: [
+                    // Header Info Card
                     Container(
-                      height: isMobile ? 200 : 250,
+                      width: double.infinity,
+                      padding: const EdgeInsets.all(20),
                       decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey[300]!),
-                        borderRadius: BorderRadius.circular(12),
-                        color: Colors.white,
-                      ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.memory(
-                          _existingFotoBarang!,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
+                        gradient: const LinearGradient(
+                          colors: [Color(0xFF667eea), Color(0xFF764ba2)],
+                          begin: Alignment.topLeft,
+                          end: Alignment.bottomRight,
                         ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _pilihSumberFoto,
-                            icon: const Icon(Icons.edit),
-                            label: Text("Ubah Foto", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.blue,
-                              foregroundColor: Colors.white,
-                            ),
+                        borderRadius: BorderRadius.circular(16),
+                        boxShadow: [
+                          BoxShadow(
+                            color: const Color(0xFF667eea).withOpacity(0.2),
+                            blurRadius: 12,
+                            offset: const Offset(0, 4),
                           ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _hapusFoto,
-                            icon: const Icon(Icons.delete),
-                            label: Text("Hapus", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                )
-              else if (_newFotoBarang != null)
-                Column(
-                  children: [
-                    Container(
-                      height: isMobile ? 200 : 250,
-                      decoration: BoxDecoration(
-                        border: Border.all(color: Colors.grey[300]!),
-                        borderRadius: BorderRadius.circular(12),
-                        color: Colors.white,
+                        ],
                       ),
-                      child: ClipRRect(
-                        borderRadius: BorderRadius.circular(12),
-                        child: Image.file(
-                          _newFotoBarang!,
-                          fit: BoxFit.cover,
-                          width: double.infinity,
-                        ),
-                      ),
-                    ),
-                    const SizedBox(height: 8),
-                    Row(
-                      children: [
-                        if (_existingFotoBarang != null)
-                          Expanded(
-                            child: OutlinedButton.icon(
-                              onPressed: _batalUbahFoto,
-                              icon: const Icon(Icons.cancel),
-                              label: Text("Batal", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            ),
-                          ),
-                        if (_existingFotoBarang != null) const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _pilihSumberFoto,
-                            icon: const Icon(Icons.edit),
-                            label: Text("Ganti", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.blue,
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                        const SizedBox(width: 8),
-                        Expanded(
-                          child: ElevatedButton.icon(
-                            onPressed: _hapusFoto,
-                            icon: const Icon(Icons.delete),
-                            label: Text("Hapus", style: TextStyle(fontSize: isMobile ? 12 : 14)),
-                            style: ElevatedButton.styleFrom(
-                              backgroundColor: Colors.red,
-                              foregroundColor: Colors.white,
-                            ),
-                          ),
-                        ),
-                      ],
-                    ),
-                  ],
-                )
-              else
-                InkWell(
-                  onTap: _pilihSumberFoto,
-                  borderRadius: BorderRadius.circular(12),
-                  child: Container(
-                    height: isMobile ? 150 : 180,
-                    decoration: BoxDecoration(
-                      border: Border.all(
-                        color: Colors.grey[300]!,
-                        width: 2,
-                        style: BorderStyle.solid,
-                      ),
-                      borderRadius: BorderRadius.circular(12),
-                      color: Colors.grey[50]!,
-                    ),
-                    child: Center(
-                      child: Column(
-                        mainAxisAlignment: MainAxisAlignment.center,
+                      child: Row(
                         children: [
-                          Icon(
-                            Icons.add_photo_alternate_outlined,
-                            size: 48,
-                            color: Colors.grey[400],
-                          ),
-                          const SizedBox(height: 12),
-                          Text(
-                            "Tambah Foto Barang",
-                            style: TextStyle(
-                              color: Colors.grey[600],
-                              fontSize: 14,
-                              fontWeight: FontWeight.w500,
+                          Container(
+                            padding: const EdgeInsets.all(12),
+                            decoration: BoxDecoration(
+                              color: Colors.white.withOpacity(0.2),
+                              borderRadius: BorderRadius.circular(12),
+                            ),
+                            child: const Icon(
+                              Icons.info_outline_rounded,
+                              color: Colors.white,
+                              size: 28,
                             ),
                           ),
-                          const SizedBox(height: 4),
-                          Text(
-                            "Tap untuk memilih foto",
-                            style: TextStyle(
-                              color: Colors.grey[500],
-                              fontSize: 12,
+                          const SizedBox(width: 16),
+                          Expanded(
+                            child: Column(
+                              crossAxisAlignment: CrossAxisAlignment.start,
+                              children: [
+                                Text(
+                                  "Edit Data Retur",
+                                  style: TextStyle(
+                                    color: Colors.white,
+                                    fontSize: isMobile ? 16 : 18,
+                                    fontWeight: FontWeight.bold,
+                                  ),
+                                ),
+                                const SizedBox(height: 4),
+                                Text(
+                                  "Perbarui informasi retur barang dengan data terbaru",
+                                  style: TextStyle(
+                                    color: Colors.white.withOpacity(0.9),
+                                    fontSize: isMobile ? 12 : 14,
+                                  ),
+                                ),
+                              ],
                             ),
                           ),
                         ],
                       ),
                     ),
-                  ),
-                ),
-              
-              const SizedBox(height: 30),
-              
-              // Submit Button
-              SizedBox(
-                width: double.infinity,
-                child: ElevatedButton(
-                  onPressed: _isLoading ? null : _updateData,
-                  style: ElevatedButton.styleFrom(
-                    backgroundColor: const Color(0xFF667eea),
-                    padding: const EdgeInsets.symmetric(vertical: 16),
-                    shape: RoundedRectangleBorder(
-                      borderRadius: BorderRadius.circular(12),
+                    
+                    const SizedBox(height: 24),
+                    
+                    // Form Section Title
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        "Informasi Data",
+                        style: TextStyle(
+                          fontSize: isMobile ? 18 : 20,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF667eea),
+                        ),
+                      ),
                     ),
-                  ),
-                  child: _isLoading
-                      ? const SizedBox(
-                          height: 20,
-                          width: 20,
-                          child: CircularProgressIndicator(
-                            color: Colors.white,
-                            strokeWidth: 2,
+                    const SizedBox(height: 4),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        "Isi semua informasi yang diperlukan",
+                        style: TextStyle(
+                          fontSize: isMobile ? 12 : 13,
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 20),
+                    
+                    // Form Fields
+                    _buildTextField(
+                      context: context,
+                      label: "Tanggal",
+                      controller: _tanggalController,
+                      icon: Icons.calendar_today_rounded,
+                      readOnly: true,
+                      onTap: _selectDate,
+                      isMobile: isMobile,
+                      isRequired: true,
+                    ),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "Nama Toko",
+                      controller: _namaTokoController,
+                      icon: Icons.storefront_rounded,
+                      isMobile: isMobile,
+                      isRequired: true,
+                    ),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "Nama IT",
+                      controller: _namaITController,
+                      icon: Icons.person_outline_rounded,
+                      isMobile: isMobile,
+                      isRequired: true,
+                    ),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "Nama Barang",
+                      controller: _namaBarangController,
+                      icon: Icons.inventory_2_rounded,
+                      isMobile: isMobile,
+                      isRequired: true,
+                    ),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "SN Barang",
+                      controller: _snBarangController,
+                      icon: Icons.qr_code_scanner_rounded,
+                      isMobile: isMobile,
+                      isRequired: false,
+                    ),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "Nomor Dokumen",
+                      controller: _nomorDokumenController,
+                      icon: Icons.description_rounded,
+                      isMobile: isMobile,
+                      isRequired: false,
+                    ),
+                    
+                    // Kategori Dropdown
+                    const SizedBox(height: 8),
+                    Text(
+                      "Kategori *",
+                      style: TextStyle(
+                        fontWeight: FontWeight.w600,
+                        fontSize: isMobile ? 14 : 15,
+                        color: Colors.grey[800],
+                      ),
+                    ),
+                    const SizedBox(height: 8),
+                    Container(
+                      decoration: BoxDecoration(
+                        color: Colors.white,
+                        borderRadius: BorderRadius.circular(12),
+                        border: Border.all(color: Colors.grey[300]!),
+                        boxShadow: [
+                          BoxShadow(
+                            color: Colors.grey[100]!,
+                            blurRadius: 4,
+                            offset: const Offset(0, 2),
                           ),
-                        )
-                      : Text(
-                          "Simpan Perubahan",
-                          style: TextStyle(
-                            fontSize: isMobile ? 14 : 16,
-                            fontWeight: FontWeight.bold,
-                            color: Colors.white,
+                        ],
+                      ),
+                      child: Padding(
+                        padding: const EdgeInsets.symmetric(horizontal: 16),
+                        child: DropdownButtonHideUnderline(
+                          child: DropdownButton<String>(
+                            value: _selectedKategori,
+                            isExpanded: true,
+                            icon: Icon(Icons.arrow_drop_down_rounded, color: Colors.grey[600]),
+                            style: TextStyle(
+                              fontSize: isMobile ? 15 : 16,
+                              color: Colors.grey[800],
+                              fontWeight: FontWeight.w500,
+                            ),
+                            dropdownColor: Colors.white,
+                            borderRadius: BorderRadius.circular(12),
+                            items: [
+                              _buildDropdownItem('OK', Colors.green),
+                              _buildDropdownItem('Service', Colors.orange),
+                              _buildDropdownItem('Waste', Colors.red),
+                            ],
+                            onChanged: (v) {
+                              if (v != null) {
+                                setState(() {
+                                  _selectedKategori = v;
+                                });
+                              }
+                            },
                           ),
                         ),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    _buildTextField(
+                      context: context,
+                      label: "Keterangan",
+                      controller: _keteranganController,
+                      icon: Icons.note_alt_rounded,
+                      maxLines: 3,
+                      isMobile: isMobile,
+                      isRequired: false,
+                    ),
+                    
+                    // Foto Barang Section
+                    const SizedBox(height: 24),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        "Foto Barang",
+                        style: TextStyle(
+                          fontSize: isMobile ? 18 : 20,
+                          fontWeight: FontWeight.bold,
+                          color: const Color(0xFF667eea),
+                        ),
+                      ),
+                    ),
+                    const SizedBox(height: 4),
+                    Padding(
+                      padding: const EdgeInsets.symmetric(horizontal: 4),
+                      child: Text(
+                        "Unggah foto barang yang diretur (Opsional)",
+                        style: TextStyle(
+                          fontSize: isMobile ? 12 : 13,
+                          color: Colors.grey[600],
+                        ),
+                      ),
+                    ),
+                    
+                    const SizedBox(height: 16),
+                    
+                    // Foto Display
+                    _buildFotoDisplaySection(isMobile),
+                    
+                    // Action Buttons
+                    const SizedBox(height: 32),
+                    
+                    Row(
+                      children: [
+                        Expanded(
+                          child: OutlinedButton(
+                            onPressed: () => Navigator.pop(context),
+                            style: OutlinedButton.styleFrom(
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              side: BorderSide(color: Colors.grey[300]!),
+                            ),
+                            child: Text(
+                              "Batal",
+                              style: TextStyle(
+                                fontSize: isMobile ? 15 : 16,
+                                fontWeight: FontWeight.w600,
+                                color: Colors.grey[700],
+                              ),
+                            ),
+                          ),
+                        ),
+                        const SizedBox(width: 16),
+                        Expanded(
+                          child: ElevatedButton(
+                            onPressed: _isLoading ? null : _updateData,
+                            style: ElevatedButton.styleFrom(
+                              backgroundColor: const Color(0xFF667eea),
+                              foregroundColor: Colors.white,
+                              padding: const EdgeInsets.symmetric(vertical: 16),
+                              shape: RoundedRectangleBorder(
+                                borderRadius: BorderRadius.circular(12),
+                              ),
+                              elevation: 0,
+                              shadowColor: Colors.transparent,
+                            ),
+                            child: _isLoading
+                                ? SizedBox(
+                                    height: 24,
+                                    width: 24,
+                                    child: CircularProgressIndicator(
+                                      strokeWidth: 2,
+                                      color: Colors.white,
+                                    ),
+                                  )
+                                : Row(
+                                    mainAxisAlignment: MainAxisAlignment.center,
+                                    children: [
+                                      const Icon(Icons.save_rounded, size: 20),
+                                      const SizedBox(width: 8),
+                                      Text(
+                                        "Simpan",
+                                        style: TextStyle(
+                                          fontSize: isMobile ? 15 : 16,
+                                          fontWeight: FontWeight.w600,
+                                        ),
+                                      ),
+                                    ],
+                                  ),
+                          ),
+                        ),
+                      ],
+                    ),
+                    
+                    const SizedBox(height: 20),
+                  ],
+                ),
+              ),
+            ),
+    );
+  }
+
+  Widget _buildLoadingState() {
+    return Center(
+      child: Column(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Container(
+            width: 80,
+            height: 80,
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(20),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.2),
+                  blurRadius: 12,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: const Padding(
+              padding: EdgeInsets.all(20),
+              child: CircularProgressIndicator(
+                strokeWidth: 3,
+                valueColor: AlwaysStoppedAnimation(Color(0xFF667eea)),
+              ),
+            ),
+          ),
+          const SizedBox(height: 24),
+          const Text(
+            "Menyimpan perubahan...",
+            style: TextStyle(
+              fontSize: 16,
+              fontWeight: FontWeight.w600,
+              color: Colors.grey,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Widget _buildFotoDisplaySection(bool isMobile) {
+    if (_existingFotoBarang != null && !_fotoChanged) {
+      return Column(
+        children: [
+          Container(
+            height: isMobile ? 220 : 280,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey[300]!),
+              borderRadius: BorderRadius.circular(16),
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Image.memory(
+                _existingFotoBarang!,
+                fit: BoxFit.cover,
+                width: double.infinity,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _pilihSumberFoto,
+                  icon: const Icon(Icons.camera_alt_rounded, size: 20),
+                  label: const Text("Ubah Foto"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF667eea),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: const BorderSide(color: Color(0xFF667eea)),
+                    ),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _hapusFoto,
+                  icon: const Icon(Icons.delete_outline_rounded, size: 20),
+                  label: const Text("Hapus Foto"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[50],
+                    foregroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: Colors.red[200]!),
+                    ),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    } else if (_newFotoBarang != null) {
+      return Column(
+        children: [
+          Container(
+            height: isMobile ? 220 : 280,
+            width: double.infinity,
+            decoration: BoxDecoration(
+              border: Border.all(color: Colors.grey[300]!),
+              borderRadius: BorderRadius.circular(16),
+              color: Colors.white,
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.grey.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 2),
+                ),
+              ],
+            ),
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(16),
+              child: Image.file(
+                _newFotoBarang!,
+                fit: BoxFit.cover,
+                width: double.infinity,
+              ),
+            ),
+          ),
+          const SizedBox(height: 16),
+          Row(
+            children: [
+              if (_existingFotoBarang != null)
+                Expanded(
+                  child: OutlinedButton.icon(
+                    onPressed: _batalUbahFoto,
+                    icon: const Icon(Icons.arrow_back_rounded, size: 20),
+                    label: const Text("Kembali"),
+                    style: OutlinedButton.styleFrom(
+                      foregroundColor: Colors.grey[700],
+                      padding: const EdgeInsets.symmetric(vertical: 14),
+                      shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(12),
+                      ),
+                      side: BorderSide(color: Colors.grey[300]!),
+                    ),
+                  ),
+                ),
+              if (_existingFotoBarang != null) const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _pilihSumberFoto,
+                  icon: const Icon(Icons.camera_alt_rounded, size: 20),
+                  label: const Text("Ganti Foto"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.white,
+                    foregroundColor: const Color(0xFF667eea),
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: const BorderSide(color: Color(0xFF667eea)),
+                    ),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: ElevatedButton.icon(
+                  onPressed: _hapusFoto,
+                  icon: const Icon(Icons.delete_outline_rounded, size: 20),
+                  label: const Text("Hapus"),
+                  style: ElevatedButton.styleFrom(
+                    backgroundColor: Colors.red[50],
+                    foregroundColor: Colors.red,
+                    padding: const EdgeInsets.symmetric(vertical: 14),
+                    shape: RoundedRectangleBorder(
+                      borderRadius: BorderRadius.circular(12),
+                      side: BorderSide(color: Colors.red[200]!),
+                    ),
+                    elevation: 0,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ],
+      );
+    } else {
+      return InkWell(
+        onTap: _pilihSumberFoto,
+        borderRadius: BorderRadius.circular(16),
+        child: Container(
+          height: isMobile ? 180 : 220,
+          width: double.infinity,
+          decoration: BoxDecoration(
+            border: Border.all(
+              color: Colors.grey[300]!,
+              width: 2,
+              style: BorderStyle.solid,
+            ),
+            borderRadius: BorderRadius.circular(16),
+            color: Colors.grey[50]!,
+          ),
+          child: Column(
+            mainAxisAlignment: MainAxisAlignment.center,
+            children: [
+              Container(
+                padding: const EdgeInsets.all(20),
+                decoration: BoxDecoration(
+                  color: Colors.white,
+                  shape: BoxShape.circle,
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.grey.withOpacity(0.2),
+                      blurRadius: 8,
+                      offset: const Offset(0, 4),
+                    ),
+                  ],
+                ),
+                child: Icon(
+                  Icons.add_photo_alternate_outlined,
+                  size: 40,
+                  color: const Color(0xFF667eea).withOpacity(0.8),
+                ),
+              ),
+              const SizedBox(height: 16),
+              Text(
+                "Tambahkan Foto Barang",
+                style: TextStyle(
+                  fontSize: isMobile ? 16 : 18,
+                  fontWeight: FontWeight.w600,
+                  color: Colors.grey[700],
+                ),
+              ),
+              const SizedBox(height: 4),
+              Text(
+                "Tap untuk mengambil atau memilih foto",
+                style: TextStyle(
+                  fontSize: isMobile ? 13 : 14,
+                  color: Colors.grey[500],
+                ),
+              ),
+              const SizedBox(height: 8),
+              Text(
+                "Max. 2MB • Format: JPG, PNG",
+                style: TextStyle(
+                  fontSize: isMobile ? 11 : 12,
+                  color: Colors.grey[400],
                 ),
               ),
             ],
           ),
         ),
-      ),
-    );
+      );
+    }
   }
 
-  Widget _buildTextField(
-    String label,
-    TextEditingController controller, {
+  // ================= HELPER WIDGETS =================
+  Widget _buildTextField({
+    required BuildContext context,
+    required String label,
+    required TextEditingController controller,
     IconData? icon,
     int maxLines = 1,
-    bool required = true,
+    bool isRequired = true,
     bool readOnly = false,
     VoidCallback? onTap,
     required bool isMobile,
@@ -2545,11 +3009,25 @@ class _EditReturPageState extends State<EditReturPage> {
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          label,
-          style: TextStyle(
-            fontWeight: FontWeight.w600, 
-            fontSize: isMobile ? 12 : 14
+        RichText(
+          text: TextSpan(
+            text: label,
+            style: TextStyle(
+              fontWeight: FontWeight.w600,
+              fontSize: isMobile ? 14 : 15,
+              color: Colors.grey[800],
+            ),
+            children: isRequired
+                ? [
+                    const TextSpan(
+                      text: ' *',
+                      style: TextStyle(
+                        color: Colors.red,
+                        fontWeight: FontWeight.bold,
+                      ),
+                    ),
+                  ]
+                : [],
           ),
         ),
         const SizedBox(height: 8),
@@ -2558,13 +3036,24 @@ class _EditReturPageState extends State<EditReturPage> {
           maxLines: maxLines,
           readOnly: readOnly,
           onTap: onTap,
+          style: TextStyle(
+            fontSize: isMobile ? 15 : 16,
+            color: Colors.grey[800],
+          ),
           decoration: InputDecoration(
-            prefixIcon: icon != null ? Icon(icon, color: const Color(0xFF667eea)) : null,
+            prefixIcon: icon != null
+                ? Icon(
+                    icon,
+                    color: const Color(0xFF667eea),
+                    size: 22,
+                  )
+                : null,
             filled: true,
             fillColor: Colors.white,
             border: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
               borderSide: BorderSide(color: Colors.grey[300]!),
+              gapPadding: 0,
             ),
             enabledBorder: OutlineInputBorder(
               borderRadius: BorderRadius.circular(12),
@@ -2574,11 +3063,19 @@ class _EditReturPageState extends State<EditReturPage> {
               borderRadius: BorderRadius.circular(12),
               borderSide: const BorderSide(color: Color(0xFF667eea), width: 2),
             ),
+            contentPadding: EdgeInsets.symmetric(
+              horizontal: 16,
+              vertical: isMobile ? 14 : 16,
+            ),
+            hintStyle: TextStyle(
+              color: Colors.grey[500],
+              fontSize: isMobile ? 14 : 15,
+            ),
           ),
-          validator: required
+          validator: isRequired
               ? (value) {
                   if (value == null || value.isEmpty) {
-                    return '$label tidak boleh kosong';
+                    return '$label wajib diisi';
                   }
                   return null;
                 }
@@ -2586,6 +3083,33 @@ class _EditReturPageState extends State<EditReturPage> {
         ),
         const SizedBox(height: 16),
       ],
+    );
+  }
+
+  DropdownMenuItem<String> _buildDropdownItem(String value, Color color) {
+    return DropdownMenuItem(
+      value: value,
+      child: Row(
+        children: [
+          Container(
+            width: 12,
+            height: 12,
+            decoration: BoxDecoration(
+              color: color,
+              shape: BoxShape.circle,
+            ),
+          ),
+          const SizedBox(width: 12),
+          Text(
+            value,
+            style: TextStyle(
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+              color: Colors.grey[800],
+            ),
+          ),
+        ],
+      ),
     );
   }
 }

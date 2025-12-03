@@ -1,21 +1,23 @@
 <?php
-header('Content-Type: application/json');
-require_once '../../db/connection.php';
+include '../../db/connection.php';
+header("Content-Type: application/json");
 
-if (!isset($_GET['id'])) {
-    echo json_encode(["status" => "error", "message" => "Parameter ID diperlukan"]);
+$id = isset($_GET['id']) ? (int)$_GET['id'] : 0;
+
+if ($id <= 0) {
+    echo json_encode(["success" => false, "message" => "ID tidak valid"]);
     exit;
 }
 
-$id = intval($_GET['id']);
-$query = $conn->query("SELECT * FROM retur_barang WHERE id = $id");
+// ? Ambil SEMUA data termasuk foto dan ttd
+$query = "SELECT * FROM retur_barang WHERE id = $id";
+$result = mysqli_query($conn, $query);
 
-if ($query->num_rows > 0) {
-    $data = $query->fetch_assoc();
-    echo json_encode(["status" => "success", "data" => $data]);
+if ($row = mysqli_fetch_assoc($result)) {
+    echo json_encode(["success" => true, "data" => $row]);
 } else {
-    echo json_encode(["status" => "error", "message" => "Data tidak ditemukan"]);
+    echo json_encode(["success" => false, "message" => "Data tidak ditemukan"]);
 }
 
-$conn->close();
+mysqli_close($conn);
 ?>
