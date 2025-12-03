@@ -7,18 +7,24 @@ if (!isset($_SESSION['admin'])) {
 include '../db/connection.php';
 
 // === PAGINATION SETUP ===
-$limit = 10; // Data per halaman
+$limit = 10;
 $page = isset($_GET['page']) ? (int)$_GET['page'] : 1;
-$page = max(1, $page); // Minimal halaman 1
+$page = max(1, $page);
 $offset = ($page - 1) * $limit;
 
-// === FILTER TANGGAL ===
-$where = "";
-$tanggal = "";
-if (isset($_GET['tanggal']) && $_GET['tanggal'] != "") {
-    $tanggal = $_GET['tanggal'];
-    $where = "WHERE tanggal = '$tanggal'";
+// === FILTER SETUP ===
+$where_conditions = [];
+$tanggal = isset($_GET['tanggal']) && $_GET['tanggal'] != "" ? $_GET['tanggal'] : "";
+$kategori = isset($_GET['kategori']) && $_GET['kategori'] != "" ? $_GET['kategori'] : "";
+
+if ($tanggal != "") {
+    $where_conditions[] = "tanggal = '$tanggal'";
 }
+if ($kategori != "") {
+    $where_conditions[] = "kategori = '$kategori'";
+}
+
+$where = count($where_conditions) > 0 ? "WHERE " . implode(" AND ", $where_conditions) : "";
 
 // === HITUNG TOTAL DATA ===
 $count_query = "SELECT COUNT(*) as total FROM retur_barang $where";
@@ -29,6 +35,15 @@ $total_pages = ceil($total_retur / $limit);
 // === AMBIL DATA DENGAN LIMIT ===
 $query = "SELECT * FROM retur_barang $where ORDER BY id DESC LIMIT $limit OFFSET $offset";
 $result = mysqli_query($conn, $query);
+
+// === HITUNG STATISTIK PER KATEGORI ===
+$stats_query = "SELECT 
+    SUM(CASE WHEN kategori = 'OK' THEN 1 ELSE 0 END) as total_ok,
+    SUM(CASE WHEN kategori = 'Service' THEN 1 ELSE 0 END) as total_service,
+    SUM(CASE WHEN kategori = 'Waste' THEN 1 ELSE 0 END) as total_waste
+FROM retur_barang" . ($tanggal ? " WHERE tanggal = '$tanggal'" : "");
+$stats_result = mysqli_query($conn, $stats_query);
+$stats = mysqli_fetch_assoc($stats_result);
 ?>
 <!doctype html>
 <html lang="id">
@@ -38,42 +53,257 @@ $result = mysqli_query($conn, $query);
   <title>Data Retur Barang - Sistem Retur</title>
   <link rel="stylesheet" href="template.css">
   <style>
-    .filter-box {
-      margin-bottom: 20px;
-      background: #f8f9fa;
-      border-radius: 10px;
-      padding: 15px;
+    .filter-section {
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      border-radius: 16px;
+      padding: 25px;
+      margin-bottom: 25px;
+      box-shadow: 0 8px 24px rgba(102, 126, 234, 0.25);
+    }
+
+    .filter-header {
       display: flex;
-      flex-wrap: wrap;
       align-items: center;
       gap: 10px;
+      margin-bottom: 20px;
     }
-    .filter-box label {
-      font-weight: 600;
-      color: #333;
+
+    .filter-header svg {
+      width: 24px;
+      height: 24px;
+      stroke: white;
+      fill: none;
+      stroke-width: 2;
+      stroke-linecap: round;
+      stroke-linejoin: round;
     }
-    .filter-box input[type="date"] {
-      padding: 6px 10px;
-      border: 1px solid #ccc;
-      border-radius: 6px;
-    }
-    .filter-box button {
-      background-color: #667eea;
+
+    .filter-header h3 {
       color: white;
-      border: none;
-      border-radius: 6px;
-      padding: 8px 14px;
+      margin: 0;
+      font-size: 18px;
+      font-weight: 600;
+    }
+
+    .filter-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+      gap: 20px;
+      margin-bottom: 20px;
+    }
+
+    .filter-group {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .filter-group label {
+      color: rgba(255, 255, 255, 0.9);
+      font-size: 13px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .filter-group input[type="date"] {
+      padding: 12px 16px;
+      border: 2px solid rgba(255, 255, 255, 0.2);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.15);
+      color: white;
+      font-size: 14px;
+      transition: all 0.3s;
+      backdrop-filter: blur(10px);
+    }
+
+    .filter-group input[type="date"]:focus {
+      outline: none;
+      border-color: rgba(255, 255, 255, 0.5);
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    .filter-group input[type="date"]::-webkit-calendar-picker-indicator {
+      filter: invert(1);
       cursor: pointer;
     }
-    .filter-box button:hover {
-      background-color: #5563d6;
+
+    /* KATEGORI CHIPS */
+    .category-filters {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+    }
+
+    .category-chip {
+      position: relative;
+      padding: 12px 24px;
+      border-radius: 25px;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+      background: rgba(255, 255, 255, 0.15);
+      color: white;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s cubic-bezier(0.4, 0, 0.2, 1);
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      backdrop-filter: blur(10px);
+    }
+
+    .category-chip:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(0, 0, 0, 0.2);
+      border-color: rgba(255, 255, 255, 0.5);
+      background: rgba(255, 255, 255, 0.25);
+    }
+
+    .category-chip.active {
+      background: white;
+      border-color: white;
+      color: #667eea;
+      box-shadow: 0 4px 15px rgba(255, 255, 255, 0.3);
+    }
+
+    .category-chip .count {
+      background: rgba(0, 0, 0, 0.15);
+      padding: 2px 8px;
+      border-radius: 12px;
+      font-size: 12px;
+      font-weight: 700;
+    }
+
+    .category-chip.active .count {
+      background: #667eea;
+      color: white;
+    }
+
+    .category-chip-all {
+      background: rgba(255, 255, 255, 0.2);
+    }
+
+    .category-chip-ok { border-color: rgba(76, 175, 80, 0.5); }
+    .category-chip-ok.active { 
+      background: #4CAF50; 
+      border-color: #4CAF50;
+      color: white;
+    }
+
+    .category-chip-service { border-color: rgba(255, 152, 0, 0.5); }
+    .category-chip-service.active { 
+      background: #FF9800; 
+      border-color: #FF9800;
+      color: white;
+    }
+
+    .category-chip-waste { border-color: rgba(244, 67, 54, 0.5); }
+    .category-chip-waste.active { 
+      background: #F44336; 
+      border-color: #F44336;
+      color: white;
+    }
+
+    .filter-actions {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+    }
+
+    .btn-filter {
+      padding: 12px 28px;
+      border: none;
+      border-radius: 25px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.3s;
+      text-decoration: none;
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+    }
+
+    .btn-filter-apply {
+      background: white;
+      color: #667eea;
+      box-shadow: 0 4px 15px rgba(255, 255, 255, 0.3);
+    }
+
+    .btn-filter-apply:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 6px 20px rgba(255, 255, 255, 0.4);
+    }
+
+    .btn-filter-reset {
+      background: rgba(255, 255, 255, 0.15);
+      color: white;
+      border: 2px solid rgba(255, 255, 255, 0.3);
+    }
+
+    .btn-filter-reset:hover {
+      background: rgba(255, 255, 255, 0.25);
+      border-color: rgba(255, 255, 255, 0.5);
+    }
+
+    /* STATS CARDS */
+    .stats-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+      gap: 16px;
+      margin-bottom: 25px;
+    }
+
+    .stat-card {
+      background: white;
+      border-radius: 12px;
+      padding: 20px;
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+      transition: all 0.3s;
+      border: 2px solid transparent;
+    }
+
+    .stat-card:hover {
+      transform: translateY(-4px);
+      box-shadow: 0 8px 24px rgba(0, 0, 0, 0.12);
+    }
+
+    .stat-card-total { border-color: #667eea; }
+    .stat-card-ok { border-color: #4CAF50; }
+    .stat-card-service { border-color: #FF9800; }
+    .stat-card-waste { border-color: #F44336; }
+
+    .stat-label {
+      font-size: 13px;
+      color: #666;
+      margin-bottom: 8px;
+      font-weight: 500;
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+    }
+
+    .stat-value {
+      font-size: 32px;
+      font-weight: 700;
+      margin-bottom: 4px;
+    }
+
+    .stat-card-total .stat-value { color: #667eea; }
+    .stat-card-ok .stat-value { color: #4CAF50; }
+    .stat-card-service .stat-value { color: #FF9800; }
+    .stat-card-waste .stat-value { color: #F44336; }
+
+    .stat-description {
+      font-size: 12px;
+      color: #999;
     }
 
     .foto-thumbnail {
       width: 60px;
       height: 60px;
       object-fit: cover;
-      border-radius: 6px;
+      border-radius: 8px;
       cursor: pointer;
       transition: transform 0.2s;
       border: 2px solid #e0e0e0;
@@ -139,7 +369,6 @@ $result = mysqli_query($conn, $query);
       font-size: 14px;
     }
 
-    /* PAGINATION STYLE */
     .pagination {
       display: flex;
       justify-content: center;
@@ -179,26 +408,116 @@ $result = mysqli_query($conn, $query);
       margin-top: 10px;
       font-size: 14px;
     }
+
+    @media (max-width: 768px) {
+      .filter-grid {
+        grid-template-columns: 1fr;
+      }
+      .stats-grid {
+        grid-template-columns: 1fr;
+      }
+      .category-filters {
+        justify-content: center;
+      }
+    }
   </style>
 </head>
 <body>
   <div class="container">
     <div class="header">
       <h2>Data Retur Barang</h2>
-      <a href="report_retur_pdf.php<?= $tanggal ? '?tanggal='.$tanggal : '' ?>" class="btn-download" target="_blank">View PDF</a>
-      <p style="color: #666; margin-top: 10px;">Total: <strong style="color: #667eea;"><?= $total_retur ?></strong> data retur</p>
+      <a href="report_retur_pdf.php<?= ($tanggal || $kategori) ? '?' : '' ?><?= $tanggal ? 'tanggal='.$tanggal : '' ?><?= ($tanggal && $kategori) ? '&' : '' ?><?= $kategori ? 'kategori='.$kategori : '' ?>" class="btn-download" target="_blank">View PDF</a>
     </div>
     
     <a href="index.php" class="back-link">Kembali ke Dashboard</a>
 
-    <!-- FILTER -->
-    <form method="get" class="filter-box">
-      <label for="tanggal">Filter Tanggal:</label>
-      <input type="date" name="tanggal" id="tanggal" value="<?= htmlspecialchars($tanggal) ?>">
-      <button type="submit">Tampilkan</button>
-      <?php if($tanggal != ""): ?>
-        <a href="retur_list.php" style="color:#667eea; text-decoration:none;">Reset</a>
-      <?php endif; ?>
+    <!-- STATS CARDS -->
+    <div class="stats-grid">
+      <div class="stat-card stat-card-total">
+        <div class="stat-label">Total Retur</div>
+        <div class="stat-value"><?= $total_retur ?></div>
+        <div class="stat-description">Semua data</div>
+      </div>
+      <div class="stat-card stat-card-ok">
+        <div class="stat-label">OK</div>
+        <div class="stat-value"><?= $stats['total_ok'] ?></div>
+        <div class="stat-description">Barang OK</div>
+      </div>
+      <div class="stat-card stat-card-service">
+        <div class="stat-label">Service</div>
+        <div class="stat-value"><?= $stats['total_service'] ?></div>
+        <div class="stat-description">Perlu service</div>
+      </div>
+      <div class="stat-card stat-card-waste">
+        <div class="stat-label">Waste</div>
+        <div class="stat-value"><?= $stats['total_waste'] ?></div>
+        <div class="stat-description">Tidak terpakai</div>
+      </div>
+    </div>
+
+    <!-- FILTER SECTION -->
+    <form method="get" class="filter-section">
+      <div class="filter-header">
+        <svg viewBox="0 0 24 24">
+          <polygon points="22 3 2 3 10 12.46 10 19 14 21 14 12.46 22 3"></polygon>
+        </svg>
+        <h3>Filter & Pencarian</h3>
+      </div>
+
+      <div class="filter-grid">
+        <div class="filter-group">
+          <label for="tanggal">Tanggal</label>
+          <input type="date" name="tanggal" id="tanggal" value="<?= htmlspecialchars($tanggal) ?>">
+        </div>
+      </div>
+
+      <div class="filter-group" style="margin-bottom: 20px;">
+        <label>Kategori</label>
+        <div class="category-filters">
+          <a href="?<?= $tanggal ? 'tanggal='.$tanggal : '' ?>" 
+             class="category-chip category-chip-all <?= $kategori == '' ? 'active' : '' ?>">
+            <span>Semua</span>
+            <span class="count"><?= $stats['total_ok'] + $stats['total_service'] + $stats['total_waste'] ?></span>
+          </a>
+          
+          <a href="?<?= $tanggal ? 'tanggal='.$tanggal.'&' : '' ?>kategori=OK" 
+             class="category-chip category-chip-ok <?= $kategori == 'OK' ? 'active' : '' ?>">
+            <span>OK</span>
+            <span class="count"><?= $stats['total_ok'] ?></span>
+          </a>
+          
+          <a href="?<?= $tanggal ? 'tanggal='.$tanggal.'&' : '' ?>kategori=Service" 
+             class="category-chip category-chip-service <?= $kategori == 'Service' ? 'active' : '' ?>">
+            <span>Service</span>
+            <span class="count"><?= $stats['total_service'] ?></span>
+          </a>
+          
+          <a href="?<?= $tanggal ? 'tanggal='.$tanggal.'&' : '' ?>kategori=Waste" 
+             class="category-chip category-chip-waste <?= $kategori == 'Waste' ? 'active' : '' ?>">
+            <span>Waste</span>
+            <span class="count"><?= $stats['total_waste'] ?></span>
+          </a>
+        </div>
+      </div>
+
+      <div class="filter-actions">
+        <button type="submit" class="btn-filter btn-filter-apply">
+          <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+            <polyline points="20 6 9 17 4 12"></polyline>
+          </svg>
+          Terapkan Filter
+        </button>
+        
+        <?php if($tanggal != "" || $kategori != ""): ?>
+          <a href="retur_list.php" class="btn-filter btn-filter-reset">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+              <polyline points="1 4 1 10 7 10"></polyline>
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"></path>
+            </svg>
+            Reset Filter
+          </a>
+        <?php endif; ?>
+      </div>
     </form>
     
     <div class="table-wrapper">
@@ -233,12 +552,12 @@ $result = mysqli_query($conn, $query);
               <td><?= htmlspecialchars($row['nomor_dokumen']) ?></td>
               <td>
                 <?php
-                  $kategori = strtolower($row['kategori']);
+                  $kategori_val = strtolower($row['kategori']);
                   $badgeClass = 'badge-default';
 
-                  if ($kategori == 'ok') $badgeClass = 'badge-ok';
-                  elseif ($kategori == 'service') $badgeClass = 'badge-service';
-                  elseif ($kategori == 'waste') $badgeClass = 'badge-waste';
+                  if ($kategori_val == 'ok') $badgeClass = 'badge-ok';
+                  elseif ($kategori_val == 'service') $badgeClass = 'badge-service';
+                  elseif ($kategori_val == 'waste') $badgeClass = 'badge-waste';
                 ?>
                 <span class="badge <?= $badgeClass ?>"><?= htmlspecialchars($row['kategori']) ?></span>
               </td>
@@ -268,7 +587,12 @@ $result = mysqli_query($conn, $query);
           <?php else: ?>
             <tr>
               <td colspan="10" style="text-align: center; padding: 40px; color: #999;">
-                Belum ada data retur <?= $tanggal ? 'pada tanggal '.date('d/m/Y', strtotime($tanggal)) : 'yang tersedia' ?>
+                <?php if($kategori != ""): ?>
+                  Tidak ada data retur dengan kategori <strong><?= htmlspecialchars($kategori) ?></strong>
+                  <?= $tanggal ? ' pada tanggal '.date('d/m/Y', strtotime($tanggal)) : '' ?>
+                <?php else: ?>
+                  Belum ada data retur <?= $tanggal ? 'pada tanggal '.date('d/m/Y', strtotime($tanggal)) : 'yang tersedia' ?>
+                <?php endif; ?>
               </td>
             </tr>
           <?php endif; ?>
@@ -280,7 +604,10 @@ $result = mysqli_query($conn, $query);
     <?php if($total_pages > 1): ?>
       <div class="pagination">
         <?php
-        $query_string = $tanggal ? "&tanggal=$tanggal" : "";
+        $query_params = [];
+        if($tanggal) $query_params[] = "tanggal=$tanggal";
+        if($kategori) $query_params[] = "kategori=$kategori";
+        $query_string = count($query_params) > 0 ? "&" . implode("&", $query_params) : "";
 
         // First + Prev
         if($page > 1): ?>
@@ -292,7 +619,6 @@ $result = mysqli_query($conn, $query);
         <?php endif; ?>
 
         <?php
-        // Nomor halaman
         $start = max(1, $page - 3);
         $end = min($total_pages, $page + 3);
 
@@ -315,7 +641,6 @@ $result = mysqli_query($conn, $query);
         <?php endif; ?>
 
         <?php
-        // Next + Last
         if($page < $total_pages): ?>
           <a href="?page=<?= $page + 1 ?><?= $query_string ?>">Next</a>
           <a href="?page=<?= $total_pages ?><?= $query_string ?>">Last</a>
